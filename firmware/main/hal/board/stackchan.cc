@@ -784,9 +784,14 @@ i2c_master_bus_handle_t hal_bridge::board_get_i2c_bus()
 // The red light: the second LED of each strip, so it can show beside the mic or reply light.
 static void set_camera_light(bool on)
 {
-    const uint8_t red = on ? 50 : 0;
-    GetHAL().setRgbColor(1, red, 0, 0);
-    GetHAL().setRgbColor(7, red, 0, 0);
+    // held: nothing else that writes to the rails can put this one out while the sensor is on
+    for (uint8_t led : {1, 7}) {
+        if (on) {
+            GetHAL().holdRgb(led, 50, 0, 0);
+        } else {
+            GetHAL().releaseRgb(led);
+        }
+    }
     GetHAL().refreshRgb();
 }
 
@@ -888,6 +893,30 @@ uint8_t hal_bridge::board_get_speaker_volume()
         volume = 10;
     }
     return volume;
+}
+
+uint8_t hal_bridge::board_live_speaker_volume()
+{
+    auto audio_codec = Board::GetInstance().GetAudioCodec();
+    return audio_codec ? audio_codec->output_volume() : 0;
+}
+
+uint8_t hal_bridge::board_saved_backlight_brightness()
+{
+    Settings settings("display", false);
+    return settings.GetInt("brightness", board_get_backlight_brightness());
+}
+
+int hal_bridge::soma_setting(const char* key, int fallback)
+{
+    Settings settings("soma", false);
+    return settings.GetInt(key, fallback);
+}
+
+void hal_bridge::soma_set_setting(const char* key, int value)
+{
+    Settings settings("soma", true);
+    settings.SetInt(key, value);
 }
 
 void hal_bridge::toggle_xiaozhi_chat_state()

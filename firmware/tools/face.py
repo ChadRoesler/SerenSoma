@@ -183,6 +183,44 @@ def all_srcs(value):
 BROW_SHAPE = {"angry": "angry", "sad": "sad", "crying": "sad", "confused": "sad", "thinking": "angry"}
 
 
+def lights_rgb(lights):
+    """A pose's rail color as the firmware wants it, or None. 168 is the most any channel gets, and
+    the color is scaled rather than clipped so pink stays pink."""
+    if not lights:
+        return None
+    m = re.fullmatch(r"#?([0-9a-fA-F]{6})", str(lights.get("color") or ""))
+    if not m:
+        raise ValueError(f"'{lights.get('color')}' isn't a color like #ff4fa0")
+    brightness = max(0, min(100, int(lights.get("brightness", 40))))
+    rgb = bytes.fromhex(m.group(1))
+    return [round(v * 168 / 255 * brightness / 100) for v in rgb]
+
+
+def half_up(x):
+    """Round like JavaScript's Math.round, so the Studio and the build agree to the pixel."""
+    import math
+    return int(math.floor(x + 0.5))
+
+
+def sided_pair(value):
+    """A pair that's the same on both sides or {left, right} per side, always as {left, right}."""
+    if isinstance(value, dict):
+        return {side: [int(v) for v in (value.get(side) or [0, 0])[:2]] for side in ("left", "right")}
+    pair = [int(v) for v in (value or [0, 0])[:2]]
+    return {"left": pair, "right": list(pair)}
+
+
+def lights_pulse(lights):
+    """Milliseconds for one breath of a pose's rail color, or 0 to hold steady."""
+    pulse = int((lights or {}).get("pulse") or 0)
+    return max(300, min(10000, pulse)) if pulse > 0 else 0
+
+
+TOUCH_GESTURES = ("tap", "drag", "left", "right", "up", "down")
+HEAD_TOUCHES = ("stroke_front_to_back", "stroke_back_to_front", "poke_front", "poke_middle", "poke_back",
+                "finger_rest", "hand", "scritch")
+
+
 class Face:
     """The authored face, resolved against defaults and validated."""
 
@@ -213,6 +251,7 @@ class Face:
         self.socket_size = list(eyes.get("socket_size", [56, 48]))
         self.iris_parallax = int(eyes.get("iris_parallax", 25))
         self.iris_travel = eyes.get("iris_travel")
+        self.glance_lag_ms = max(0, min(300, int(eyes.get("glance_lag_ms", 40))))
         self.clip_radius = int(eyes.get("clip_radius", 0))
         # Colour painted above the upper lid as it closes. Without it a lid
         # shorter than the socket can never occlude the eye. Sampled from the
@@ -237,6 +276,8 @@ class Face:
 
         self.decorators = dict(parts.get("decorators") or {})
         self.emotions = self._resolve_emotions(doc.get("emotions") or {})
+        self.touch = self._resolve_touch(doc.get("touch"))
+        self.head = self._resolve_head(doc.get("head"))
 
     def _resolve_emotions(self, overrides):
         """Merge author overrides onto the defaults, then degrade any reference
@@ -269,6 +310,12 @@ class Face:
                 pose[part] = pose[part + "_sides"]["left"]
             pose["mouth"] = self._pick(pose.get("mouth"), self.mouth_shapes, "mouth shape", name)
             pose["motion"] = self._resolve_motion(pose.get("motion"), name)
+            try:
+                pose["lights_rgb"] = lights_rgb(pose.get("lights"))
+                pose["lights_pulse"] = lights_pulse(pose.get("lights"))
+            except (ValueError, AttributeError, TypeError) as e:
+                print(f"  warning: {name}'s lights: {e}; no lights")
+                pose["lights_rgb"] = None
             dec = pose.get("decorator")
             # one decorator or several (Face Studio); only the drawn ones are kept
             decs = [d for d in (dec if isinstance(dec, list) else [dec] if dec else []) if d in self.decorators]
@@ -286,18 +333,65 @@ class Face:
                 pose["brow_shape"] = pose["brow_shape_sides"]["left"]
         return resolved
 
+    def _resolve_touch(self, touch):
+        """Rectangles of the screen that answer a tap with a pose. None: the face doesn't say."""
+        if touch is None:
+            return None
+        spots = []
+        for name, spot in touch.items():
+            pose, rect = spot.get("pose"), spot.get("rect") or []
+            if pose not in self.emotions:
+                print(f"  warning: touch spot {name} wants pose '{pose}', which this face doesn't have; left out")
+                continue
+            if len(rect) != 4:
+                print(f"  warning: touch spot {name} has no rectangle; left out")
+                continue
+            gesture = spot.get("gesture", "tap")
+            if gesture not in TOUCH_GESTURES:
+                print(f"  warning: touch spot {name} has gesture '{gesture}', which isn't one; left out")
+                continue
+            one = {"name": name, "pose": pose, "rect": [int(v) for v in rect], "ms": int(spot.get("ms", 2000)), "gesture": gesture}
+            spots.append(one)
+            if spot.get("mirror"):
+                x, y, w, h = one["rect"]
+                spots.append({**one, "name": f"{name} (mirror)", "rect": [SCREEN_W - x - w, y, w, h],
+                              "gesture": {"left": "right", "right": "left"}.get(gesture, gesture)})
+        return spots
+
+    def _resolve_head(self, head):
+        """What each kind of touch on top of the head shows. None: the face doesn't say."""
+        if head is None:
+            return None
+        out = {}
+        for kind, spec in head.items():
+            if kind not in HEAD_TOUCHES:
+                print(f"  warning: head touch '{kind}' isn't one; left out")
+            elif spec.get("pose") not in self.emotions:
+                print(f"  warning: head touch {kind} wants pose '{spec.get('pose')}', which this face doesn't have; left out")
+            else:
+                out[kind] = {"pose": spec["pose"], "ms": int(spec.get("ms", 2000))}
+        return out
+
     def _resolve_motion(self, motion, emotion):
         """What a pose asks to do while it holds. Only what can actually run reaches the device."""
+        out = {}
+        cycle = int((motion or {}).get("mouth_cycle") or 0)
+        if cycle > 0:
+            out["mouth_cycle"] = max(300, min(20000, cycle))
+        roll = int((motion or {}).get("roll") or 0)
+        if roll > 0:
+            out["roll"] = max(300, min(5000, roll))
         twitch = (motion or {}).get("twitch")
         if not twitch:
-            return {}
+            return out
         lid = twitch.get("lid", "closed")
         if lid not in self.lids_upper:
             print(f"  warning: {emotion}'s twitch wants upper lid '{lid}', which isn't drawn; no twitch")
-            return {}
+            return out
         every = list(twitch.get("every") or [2500, 6000])
-        return {"twitch": {"eye": twitch.get("eye", "right"), "lid": lid, "every": [int(every[0]), int(every[1])],
-                           "flutters": int(twitch.get("flutters", 3))}}
+        out["twitch"] = {"eye": twitch.get("eye", "right"), "lid": lid, "every": [int(every[0]), int(every[1])],
+                         "flutters": int(twitch.get("flutters", 3))}
+        return out
 
     @staticmethod
     def _pick(wanted, available, label, emotion):
@@ -409,15 +503,32 @@ class Compositor:
         return self._cache[key]
 
     def _auto_travel(self):
-        """Bound the iris so it can never slide out of the sclera."""
-        iris_src = side_src(self.face.iris, "right") or side_src(self.face.iris, "left")
-        sclera_src = side_src(self.face.sclera, "right") or side_src(self.face.sclera, "left")
-        if not iris_src or not sclera_src:
-            return [12, 8]
-        iris = self._load(iris_src)
-        sclera = self._load(sclera_src)
-        return [max(0, (sclera.width - iris.width) // 2),
-                max(0, (sclera.height - iris.height) // 2)]
+        return self.iris_fit("right")["travel"]
+
+    def iris_fit(self, side):
+        """Where the iris rests and how far it goes, measured from the drawn pixels, not the PNGs:
+        it rests in the middle of the eye white, and at full travel its middle is half an iris past
+        the white's edge, rolled clean off. room is how far it goes and stays inside."""
+        key = ("fit", side)
+        if key in self._cache:
+            return self._cache[key]
+        f = self.face
+        s, i = self._eye_part(f.sclera, side), self._eye_part(f.iris, side)
+        sb = s.getchannel("A").getbbox() if s is not None else None
+        ib = i.getchannel("A").getbbox() if i is not None else None
+        if not sb or not ib:
+            fit = {"offset": [0, 0], "travel": [12, 8], "room": None}
+        else:
+            sw, sh = f.socket_size
+            sx, sy = int((sw - s.width) / 2), int((sh - s.height) / 2)
+            ix, iy = int((sw - i.width) / 2), int((sh - i.height) / 2)
+            ww, wh, iw, ih = sb[2] - sb[0], sb[3] - sb[1], ib[2] - ib[0], ib[3] - ib[1]
+            fit = {"offset": [half_up(sx + (sb[0] + sb[2]) / 2 - ix - (ib[0] + ib[2]) / 2),
+                              half_up(sy + (sb[1] + sb[3]) / 2 - iy - (ib[1] + ib[3]) / 2)],
+                   "travel": [half_up(ww / 2 + iw / 2), half_up(wh / 2 + ih / 2)],
+                   "room": [max(0, int((ww - iw) / 2)), max(0, int((wh - ih) / 2))]}
+        self._cache[key] = fit
+        return fit
 
     def _auto_lid_fill(self):
         """Most common opaque colour in the upper lid's topmost drawn row.
@@ -472,13 +583,18 @@ class Compositor:
         swap = f.lid_mode == "swap"
         shut = swap and pose.get("eyeOpen", 100) < 50
 
-        gx = int(gaze[0] * self.iris_travel[0])
-        gy = int(gaze[1] * self.iris_travel[1])
+        look = sided_pair(pose.get("look"))[side]
+        fit = self.iris_fit(side)
+        gx = int(max(-1.0, min(1.0, gaze[0] + look[0] / 100.0)) * self.iris_travel[0])
+        gy = int(max(-1.0, min(1.0, gaze[1] + look[1] / 100.0)) * self.iris_travel[1])
 
         sw, sh = f.socket_size
-        # Socket follows a fraction of the gaze; the iris takes all of it.
-        scx = SCREEN_W / 2 + anchor[0] + gx * f.iris_parallax / 100.0
-        scy = SCREEN_H / 2 + anchor[1] + gy * f.iris_parallax / 100.0
+        # Socket follows a fraction of the gaze, only as far as the iris stays in the white; the iris takes all of it.
+        room = fit["room"]
+        fx = max(-room[0], min(room[0], gx)) if room else gx
+        fy = max(-room[1], min(room[1], gy)) if room else gy
+        scx = SCREEN_W / 2 + anchor[0] + fx * f.iris_parallax / 100.0
+        scy = SCREEN_H / 2 + anchor[1] + fy * f.iris_parallax / 100.0
 
         socket = self.Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
 
@@ -488,7 +604,7 @@ class Compositor:
         i = self._eye_part(f.iris, side)
         if i is not None:
             layer = self.Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
-            self._composite_clipped(layer, i, int((sw - i.width) / 2 + gx), int((sh - i.height) / 2 + gy))
+            self._composite_clipped(layer, i, int((sw - i.width) / 2 + gx + fit["offset"][0]), int((sh - i.height) / 2 + gy + fit["offset"][1]))
             if f.iris_mask == "sclera" and s is not None:
                 # the iris only shows where the eye white is
                 white = self.Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
@@ -559,16 +675,16 @@ class Compositor:
 
     def _render_brows(self, canvas, pose):
         f = self.face
-        brow = pose.get("brow", [0, 0])
+        brow = sided_pair(pose.get("brow"))
         sides = pose.get("brow_shape_sides") or {}
         src_l, _, mir_l, _ = self.brow_srcs(sides.get("left", pose.get("brow_shape", "neutral")))
         _, src_r, _, mir_r = self.brow_srcs(sides.get("right", pose.get("brow_shape", "neutral")))
         if src_l:
             self._paste_centre(canvas, self._load(src_l, mir_l), SCREEN_W / 2 + f.brow_left_pos[0],
-                               SCREEN_H / 2 + f.brow_left_pos[1] + brow[0], brow[1])
+                               SCREEN_H / 2 + f.brow_left_pos[1] + brow["left"][0], brow["left"][1])
         if src_r:
             self._paste_centre(canvas, self._load(src_r, mir_r), SCREEN_W / 2 + f.brow_right_pos[0],
-                               SCREEN_H / 2 + f.brow_right_pos[1] + brow[0], -brow[1])
+                               SCREEN_H / 2 + f.brow_right_pos[1] + brow["right"][0], -brow["right"][1])
 
     def render(self, emotion, mouth_open=0.0, gaze=(0.0, 0.0), blink=None):
         f = self.face
@@ -784,6 +900,8 @@ def cmd_build(args):
         mir_left = mir and face.drawn_eye == "right"
         mir_right = mir and face.drawn_eye == "left"
         manifest = {
+            **({"touch": face.touch} if face.touch is not None else {}),
+            **({"head": face.head} if face.head is not None else {}),
             "name": face.name,
             "version": MANIFEST_VERSION,
             "background": face.background,
@@ -810,8 +928,12 @@ def cmd_build(args):
                 "leftPos": face.left_pos,
                 "rightPos": face.right_pos,
                 "socketSize": face.socket_size,
-                "irisTravel": face.iris_travel or Compositor(face).iris_travel,
+                "irisTravel": face.iris_travel or comp.iris_travel,
+                "irisOffsetLeft": comp.iris_fit("left")["offset"],
+                "irisOffsetRight": comp.iris_fit("right")["offset"],
+                **({"irisRoom": comp.iris_fit("right")["room"]} if comp.iris_fit("right")["room"] else {}),
                 "irisParallax": face.iris_parallax,
+                "glanceLagMs": face.glance_lag_ms,
                 "clipRadius": face.clip_radius,
                 "lidFill": face.lid_fill or Compositor(face).lid_fill or "",
             },
@@ -856,7 +978,11 @@ def cmd_build(args):
                     **({"overlay": b.asset("hr_%s" % name[:10], pose["overlay"]) if pose["overlay"] else ""}
                        if "overlay" in pose else {}),
                     "eyeOpen": int(pose.get("eyeOpen", 100)),
-                    "brow": list(pose.get("brow", [0, 0])),
+                    "brow": sided_pair(pose.get("brow"))["left"],
+                    **({"browLeft": sided_pair(pose.get("brow"))["left"], "browRight": sided_pair(pose.get("brow"))["right"]}
+                       if sided_pair(pose.get("brow"))["left"] != sided_pair(pose.get("brow"))["right"] else {}),
+                    **({"lookLeft": sided_pair(pose.get("look"))["left"], "lookRight": sided_pair(pose.get("look"))["right"]}
+                       if pose.get("look") else {}),
                     "browShape": pose.get("brow_shape", ""),
                     # per side (Face Studio); older firmware reads upper/lower/browShape only
                     "upperLeft": pose["upper_sides"]["left"], "upperRight": pose["upper_sides"]["right"],
@@ -864,6 +990,8 @@ def cmd_build(args):
                     "browShapeLeft": (pose.get("brow_shape_sides") or {}).get("left", ""),
                     "browShapeRight": (pose.get("brow_shape_sides") or {}).get("right", ""),
                     **({"motion": pose["motion"]} if pose.get("motion") else {}),
+                    **({"lights": pose["lights_rgb"]} if pose.get("lights_rgb") else {}),
+                    **({"lightsPulse": pose["lights_pulse"]} if pose.get("lights_rgb") and pose.get("lights_pulse") else {}),
                 }
                 for name, pose in face.emotions.items()
             },

@@ -6,6 +6,7 @@
 #pragma once
 #include "../modifiable.h"
 #include "../avatar/decorators/decorators.h"
+#include "../avatar/skins/custom/custom.h"
 #include "../utils/random.h"
 #include <smooth_ui_toolkit.hpp>
 #include <hal/hal.h>
@@ -39,6 +40,15 @@ public:
 
     void _update(Modifiable& stackchan) override
     {
+        // a face that says what its head touches show has replaced this response
+        if (stackchan.hasAvatar()) {
+            auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar());
+            if (custom != nullptr && custom->headDeclared()) {
+                _event_swipe   = false;
+                _event_release = false;
+                return;
+            }
+        }
         uint32_t now = GetHAL().millis();
 
         // 处理“被抚摸中”事件

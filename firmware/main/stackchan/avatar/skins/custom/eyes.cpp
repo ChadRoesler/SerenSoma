@@ -23,6 +23,8 @@ EyeRig::EyeRig(lv_obj_t* parent, const FaceManifest_t& manifest, bool isLeftEye)
     _is_left_eye = isLeftEye;
     _anchor      = isLeftEye ? manifest.leftEyePos : manifest.rightEyePos;
     _iris_travel = manifest.irisTravel;
+    _iris_offset = isLeftEye ? manifest.irisOffsetLeft : manifest.irisOffsetRight;
+    _iris_room   = manifest.irisRoom;
     _parallax    = manifest.irisParallax;
     _lid_swap    = manifest.lidSwap;
 
@@ -207,14 +209,23 @@ void EyeRig::setPosition(const Vector2i& position)
     // The iris takes the full gaze offset; the socket follows a fraction of it.
     // Small deltas (breathing) read as a gentle whole-eye drift, large ones
     // (a glance) read as the iris travelling inside a mostly still eye.
-    const int iris_x = map_range(_position.x, -100, 100, -_iris_travel.x, _iris_travel.x);
-    const int iris_y = map_range(_position.y, -100, 100, -_iris_travel.y, _iris_travel.y);
+    const int iris_x = map_range(clamp(_position.x + _look.x, -100, 100), -100, 100, -_iris_travel.x, _iris_travel.x);
+    const int iris_y = map_range(clamp(_position.y + _look.y, -100, 100), -100, 100, -_iris_travel.y, _iris_travel.y);
+    _iris_now        = Vector2i{iris_x, iris_y};
 
     if (_iris) {
-        _iris->setPos(iris_x, iris_y);
+        _iris->setPos(iris_x + _iris_offset.x, iris_y + _iris_offset.y);
     }
 
-    _socket->setPos(_anchor.x + (iris_x * _parallax) / 100, _anchor.y + (iris_y * _parallax) / 100);
+    const int follow_x = _iris_room.x >= 0 ? clamp(iris_x, -_iris_room.x, _iris_room.x) : iris_x;
+    const int follow_y = _iris_room.y >= 0 ? clamp(iris_y, -_iris_room.y, _iris_room.y) : iris_y;
+    _socket->setPos(_anchor.x + (follow_x * _parallax) / 100, _anchor.y + (follow_y * _parallax) / 100);
+}
+
+void EyeRig::setLook(const Vector2i& look)
+{
+    _look = look;
+    setPosition(_position);
 }
 
 void EyeRig::setWeight(int weight)

@@ -238,6 +238,15 @@ public:
     void setRgbColor(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
     void showRgbColor(uint8_t r, uint8_t g, uint8_t b);
     void refreshRgb();
+    // Hold an LED at a color: nothing written with setRgbColor shows on it until it's released,
+    // and then what was written meanwhile comes back. The camera, mic and reply lights use this.
+    void holdRgb(uint8_t index, uint8_t r, uint8_t g, uint8_t b);
+    void releaseRgb(uint8_t index);
+    void shownRgb(uint8_t index, uint8_t& r, uint8_t& g, uint8_t& b);
+    // Master light level over everything on the rails, 0~100. A held light (mic, reply, camera) never
+    // goes below a floor that stays visible: it can be dimmed, never hidden.
+    void setRgbDimmer(int percent);
+    int rgbDimmer();
 
     /* ---------------------------------- Power --------------------------------- */
     void setServoPowerEnabled(bool enabled);

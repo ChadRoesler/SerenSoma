@@ -69,6 +69,10 @@ void board_set_backlight_brightness(uint8_t brightness, bool permanent = false);
 uint8_t board_get_backlight_brightness();
 void board_set_speaker_volume(uint8_t volume, bool permanent = false);
 uint8_t board_get_speaker_volume();
+uint8_t board_live_speaker_volume();       // what the codec is playing at now, a night cap included
+uint8_t board_saved_backlight_brightness();
+int soma_setting(const char* key, int fallback);   // Soma's own, saved on the robot (NVS "soma")
+void soma_set_setting(const char* key, int value);
 
 void app_play_sound(const std::string_view& sound);
 

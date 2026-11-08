@@ -6,6 +6,7 @@
 #pragma once
 #include "../modifiable.h"
 #include "../utils/random.h"
+#include "../avatar/skins/custom/custom.h"
 #include <smooth_ui_toolkit.hpp>
 #include <hal/hal.h>
 #include <cstdint>
@@ -31,6 +32,11 @@ public:
         }
 
         uint32_t now = GetHAL().millis();
+        // the other eye catches up
+        if (_lag_pending && now >= _lag_at) {
+            stackchan.avatar().rightEye().setPosition(_lag_position);
+            _lag_pending = false;
+        }
         if (now < _next_tick) {
             return;
         }
@@ -52,8 +58,10 @@ private:
             // 【动作 1：眼神游离】双眼协同移动一个小范围
             int offsetX = Random::getInstance().getInt(-20, 20);
             int offsetY = Random::getInstance().getInt(-15, 15);
+            // Wren's right eye (screen left) leads, the dominant one; the other follows a beat later,
+            // because two eyes landing on the same frame looks mechanical
             avatar.leftEye().setPosition({offsetX, offsetY});
-            avatar.rightEye().setPosition({offsetX, offsetY});
+            follow(avatar, {offsetX, offsetY});
 
             // 嘴巴也配合动一下
             avatar.mouth().setPosition({0, Random::getInstance().getInt(0, 10)});
@@ -73,7 +81,7 @@ private:
     {
         // 位置回归中心
         avatar.leftEye().setPosition({0, 0});
-        avatar.rightEye().setPosition({0, 0});
+        follow(avatar, {0, 0});
         avatar.mouth().setPosition({0, 0});
 
         // 缩放回归正常
@@ -84,6 +92,25 @@ private:
         avatar.mouth().setRotation(0);
         avatar.mouth().setWeight(0);
     }
+
+    // the other eye: at once if the face says 0, otherwise after its glance lag (40 ms unless it says)
+    void follow(avatar::Avatar& avatar, const uitk::Vector2i& position)
+    {
+        auto* custom  = dynamic_cast<avatar::CustomAvatar*>(&avatar);
+        const int lag = custom ? custom->glanceLagMs() : 40;
+        if (lag <= 0) {
+            avatar.rightEye().setPosition(position);
+            _lag_pending = false;
+            return;
+        }
+        _lag_position = position;
+        _lag_at       = GetHAL().millis() + lag;
+        _lag_pending  = true;
+    }
+
+    bool _lag_pending = false;
+    uint32_t _lag_at  = 0;
+    uitk::Vector2i _lag_position{0, 0};
 
     uint32_t _interval_min;
     uint32_t _interval_max;

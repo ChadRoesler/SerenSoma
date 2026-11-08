@@ -15,7 +15,14 @@
  *   GET  /api/status            battery, wifi, heap, head angles, face name
  *   POST /api/head    {"yaw":0,"pitch":20,"speed":150}
  *   POST /api/led     {"r":0,"g":120,"b":80}
- *   POST /api/emotion {"name":"happy"}
+ *   POST /api/leds    {"frame":[[r,g,b],...]} from LED 0 up, or {"index":3,"r":0,"g":50,"b":0} for one
+ *   POST /api/settings {} reads them; any of "dimmer", "volume", "brightness" (0~100) saves it on the robot;
+ *                     "night": {"dimmer","volume","brightness"} caps them until "night": null. Never saved.
+ *   POST /api/emotion {"name":"sleepy","rest":true} also makes it the pose to return to in place of neutral,
+ *                     until the next /api/emotion without "rest"
+ *   POST /api/emotion {"name":"happy"} and optionally, to try things out without sending a face:
+ *                     "lights":[r,g,b], "lightsPulse":ms, "mouthCycle":ms, "roll":ms,
+ *                     "look":{"left":[x,y],"right":[x,y]}, "brow":{"left":[y,tilt],"right":[y,tilt]}
  *   POST /api/say     {"text":"hello"}
  *   GET  /api/photo   a JPEG; the camera is on only for this, red on both sides while it is.
  *                     ?probe=1 runs the same thing and answers with sizes, no picture leaves.
@@ -24,6 +31,7 @@
  *   POST /api/face-restore  on the next boot, put the previous face back
  *   POST /api/reboot
  *   POST /api/wake    open the voice channel, the same as a tap, if it's idle
+ *   GET  /api/touch-spots  the current face's touch spot names, in order, and what its head touches show
  *   POST /api/react   {"name":"laughing","ms":2000}: show a pose for a moment, then go back
  *   POST /api/twitch  {"eye":"right","lid":"closed","every":[2500,6000],"flutters":3}, or {"off":true}
  *                     tries a twitch on the current pose, until the next emotion
@@ -169,6 +177,96 @@ const char* reset_reason_name()
     }
 }
 
+// Night caps are never saved: the voice server sends them again every minute, so a reboot at night
+// stays dim, and the day setting is back the moment they're cleared.
+struct NightCap_t {
+    bool on        = false;
+    int dimmer     = 100;
+    int volume     = 100;
+    int brightness = 100;
+};
+NightCap_t _night;
+int _applied_volume     = -1;
+int _applied_brightness = -1;
+
+int capped(int mine, int cap)
+{
+    return _night.on ? std::min(mine, cap) : mine;
+}
+
+void apply_settings()
+{
+    GetHAL().setRgbDimmer(capped(hal_bridge::soma_setting("dimmer", 100), _night.dimmer));
+    // only when it changes: setting the speaker writes flash
+    const int volume = capped(hal_bridge::board_get_speaker_volume(), _night.volume);
+    if (volume != _applied_volume) {
+        hal_bridge::board_set_speaker_volume(volume, false);
+        _applied_volume = volume;
+    }
+    const int brightness = capped(hal_bridge::board_saved_backlight_brightness(), _night.brightness);
+    if (brightness != _applied_brightness) {
+        hal_bridge::board_set_backlight_brightness(brightness, false);
+        _applied_brightness = brightness;
+    }
+}
+
+void add_settings(cJSON* root)
+{
+    cJSON* s = cJSON_AddObjectToObject(root, "settings");
+    cJSON_AddNumberToObject(s, "dimmer", hal_bridge::soma_setting("dimmer", 100));
+    cJSON_AddNumberToObject(s, "volume", hal_bridge::board_get_speaker_volume());
+    cJSON_AddNumberToObject(s, "brightness", hal_bridge::board_saved_backlight_brightness());
+    if (_night.on) {
+        cJSON* n = cJSON_AddObjectToObject(s, "night");
+        cJSON_AddNumberToObject(n, "dimmer", _night.dimmer);
+        cJSON_AddNumberToObject(n, "volume", _night.volume);
+        cJSON_AddNumberToObject(n, "brightness", _night.brightness);
+    } else {
+        cJSON_AddNullToObject(s, "night");
+    }
+    cJSON* a = cJSON_AddObjectToObject(s, "applied");
+    cJSON_AddNumberToObject(a, "dimmer", GetHAL().rgbDimmer());
+    cJSON_AddNumberToObject(a, "volume", hal_bridge::board_live_speaker_volume());
+    cJSON_AddNumberToObject(a, "brightness", hal_bridge::board_get_backlight_brightness());
+}
+
+esp_err_t handle_settings(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body = req->content_len > 0 ? read_body(req) : nullptr;
+    if (body != nullptr) {
+        if (cJSON_IsNumber(cJSON_GetObjectItem(body, "dimmer"))) {
+            hal_bridge::soma_set_setting("dimmer", uitk::clamp(json_int(body, "dimmer", 100), 0, 100));
+        }
+        if (cJSON_IsNumber(cJSON_GetObjectItem(body, "volume"))) {
+            hal_bridge::board_set_speaker_volume(uitk::clamp(json_int(body, "volume", 70), 0, 100), true);
+            _applied_volume = -1;
+        }
+        if (cJSON_IsNumber(cJSON_GetObjectItem(body, "brightness"))) {
+            // 5, not 0: a dark screen in the day looks like a dead robot
+            hal_bridge::board_set_backlight_brightness(uitk::clamp(json_int(body, "brightness", 75), 5, 100), true);
+            _applied_brightness = -1;
+        }
+        cJSON* night = cJSON_GetObjectItem(body, "night");
+        if (cJSON_IsObject(night)) {
+            _night.on         = true;
+            _night.dimmer     = uitk::clamp(json_int(night, "dimmer", 100), 0, 100);
+            _night.volume     = uitk::clamp(json_int(night, "volume", 100), 0, 100);
+            _night.brightness = uitk::clamp(json_int(night, "brightness", 100), 0, 100);
+        } else if (cJSON_IsNull(night) || cJSON_IsFalse(night)) {
+            _night.on = false;
+        }
+        cJSON_Delete(body);
+    }
+    apply_settings();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    add_settings(root);
+    return send_json(req, root);
+}
+
 esp_err_t handle_status(httpd_req_t* req)
 {
     if (!token_ok(req)) {
@@ -180,6 +278,28 @@ esp_err_t handle_status(httpd_req_t* req)
     cJSON_AddStringToObject(root, "firmware", FIRMWARE_VERSION);
     cJSON_AddNumberToObject(root, "uptimeMs", static_cast<double>(esp_timer_get_time() / 1000));
     cJSON_AddStringToObject(root, "resetReason", reset_reason_name());
+    {
+        // what each LED was last told to show, rrggbb from LED 0: lets a test read the rails
+        char leds[12 * 6 + 1] = {0};
+        for (int i = 0; i < 12; i++) {
+            uint8_t r, g, b;
+            GetHAL().shownRgb(i, r, g, b);
+            snprintf(leds + i * 6, 7, "%02x%02x%02x", r, g, b);
+        }
+        cJSON_AddStringToObject(root, "leds", leds);
+    }
+    {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                char rig[72] = {0};
+                custom->rigState(rig, sizeof(rig));
+                cJSON_AddStringToObject(root, "rig", rig);
+                cJSON_AddStringToObject(root, "resting", custom->resting().c_str());
+            }
+        }
+    }
     if (*face_push::last_result() != '\0') {
         cJSON_AddStringToObject(root, "facePush", face_push::last_result());
     }
@@ -192,6 +312,7 @@ esp_err_t handle_status(httpd_req_t* req)
             }
         }
     }
+    add_settings(root);
     cJSON_AddNumberToObject(root, "batteryLevel", GetHAL().getBatteryLevel());
     cJSON_AddBoolToObject(root, "charging", GetHAL().isBatteryCharging());
     cJSON_AddNumberToObject(root, "freeInternalHeap",
@@ -249,6 +370,44 @@ esp_err_t handle_head(httpd_req_t* req)
     return send_json(req, root);
 }
 
+// One rail is LEDs 0-5, the other 6-11. Values stop at 168, the same limit /api/led has.
+esp_err_t handle_leds(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body = read_body(req);
+    if (body == nullptr) {
+        return send_error(req, "400 Bad Request", "expected a JSON body");
+    }
+    constexpr int kLeds = 12;
+    cJSON* frame = cJSON_GetObjectItem(body, "frame");
+    if (cJSON_IsArray(frame)) {
+        const int count = std::min(cJSON_GetArraySize(frame), kLeds);
+        for (int i = 0; i < count; i++) {
+            cJSON* c = cJSON_GetArrayItem(frame, i);
+            if (cJSON_IsArray(c) && cJSON_GetArraySize(c) == 3) {
+                GetHAL().setRgbColor(i, uitk::clamp(cJSON_GetArrayItem(c, 0)->valueint, 0, 168),
+                                     uitk::clamp(cJSON_GetArrayItem(c, 1)->valueint, 0, 168),
+                                     uitk::clamp(cJSON_GetArrayItem(c, 2)->valueint, 0, 168));
+            }
+        }
+    } else {
+        const int index = json_int(body, "index", -1);
+        if (index < 0 || index >= kLeds) {
+            cJSON_Delete(body);
+            return send_error(req, "400 Bad Request", "expected a frame, or an index from 0 to 11");
+        }
+        GetHAL().setRgbColor(index, uitk::clamp(json_int(body, "r", 0), 0, 168), uitk::clamp(json_int(body, "g", 0), 0, 168),
+                             uitk::clamp(json_int(body, "b", 0), 0, 168));
+    }
+    cJSON_Delete(body);
+    GetHAL().refreshRgb();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
 esp_err_t handle_led(httpd_req_t* req)
 {
     if (!token_ok(req)) {
@@ -294,13 +453,70 @@ esp_err_t handle_emotion(httpd_req_t* req)
     }
 
     const std::string emotion = name->valuestring;
+    cJSON* lights             = cJSON_GetObjectItem(body, "lights");
+    const bool hasLights      = cJSON_IsArray(lights) && cJSON_GetArraySize(lights) == 3;
+    int rgb[3]                = {0, 0, 0};
+    for (int i = 0; hasLights && i < 3; i++) {
+        rgb[i] = uitk::clamp(cJSON_GetArrayItem(lights, i)->valueint, 0, 168);
+    }
+    const int asked = json_int(body, "lightsPulse", 0);
+    const int pulse = asked > 0 ? uitk::clamp(asked, 300, 10000) : 0;
+
+    auto pairOf = [](cJSON* node, const char* side, int lo, int hi, int& a, int& b) {
+        cJSON* pair = cJSON_GetObjectItem(node, side);
+        if (cJSON_IsArray(pair) && cJSON_GetArraySize(pair) == 2) {
+            a = uitk::clamp(cJSON_GetArrayItem(pair, 0)->valueint, lo, hi);
+            b = uitk::clamp(cJSON_GetArrayItem(pair, 1)->valueint, lo, hi);
+        }
+    };
+    cJSON* look         = cJSON_GetObjectItem(body, "look");
+    cJSON* brow         = cJSON_GetObjectItem(body, "brow");
+    const bool hasRig   = cJSON_IsObject(look) || cJSON_IsObject(brow);
+    int lookL[2] = {0, 0}, lookR[2] = {0, 0}, browL[2] = {0, 0}, browR[2] = {0, 0};
+    if (cJSON_IsObject(look)) {
+        pairOf(look, "left", -100, 100, lookL[0], lookL[1]);
+        pairOf(look, "right", -100, 100, lookR[0], lookR[1]);
+    }
+    if (cJSON_IsObject(brow)) {
+        pairOf(brow, "left", -3600, 3600, browL[0], browL[1]);
+        pairOf(brow, "right", -3600, 3600, browR[0], browR[1]);
+    }
+    const bool rest      = cJSON_IsTrue(cJSON_GetObjectItem(body, "rest"));
+    const int askedCycle = json_int(body, "mouthCycle", 0);
+    const int mouthCycle = askedCycle > 0 ? uitk::clamp(askedCycle, 300, 20000) : 0;
+    const int askedRoll  = json_int(body, "roll", 0);
+    const int roll       = askedRoll > 0 ? uitk::clamp(askedRoll, 300, 5000) : 0;
     cJSON_Delete(body);
+
+    {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                custom->setResting(rest ? emotion : "");
+            }
+        }
+    }
 
     // Routed through the display so the sleepy side effects (servo park, idle
     // teardown) still happen, rather than poking the avatar directly.
     auto* display = Board::GetInstance().GetDisplay();
     if (display != nullptr) {
         display->SetEmotion(emotion.c_str());
+    }
+    if (hasLights || hasRig) {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                if (hasLights) {
+                    custom->showLights(rgb[0], rgb[1], rgb[2], pulse);
+                }
+                if (hasRig) {
+                    custom->tryRig({lookL[0], lookL[1]}, {lookR[0], lookR[1]}, {browL[0], browL[1]}, {browR[0], browR[1]}, mouthCycle, roll);
+                }
+            }
+        }
     }
 
     mclog::tagInfo(_tag, "emotion: {}", emotion);
@@ -392,6 +608,35 @@ esp_err_t handle_react(httpd_req_t* req)
     }
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
+esp_err_t handle_touch_spots(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* root  = cJSON_CreateObject();
+    cJSON* names = cJSON_AddArrayToObject(root, "spots");
+    {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                for (const auto& spot : custom->touchSpots()) {
+                    cJSON_AddItemToArray(names, cJSON_CreateString(spot.name.c_str()));
+                }
+                if (custom->headDeclared()) {
+                    cJSON* head = cJSON_AddObjectToObject(root, "head");
+                    for (const auto& kv : custom->headTouches()) {
+                        cJSON* one = cJSON_AddObjectToObject(head, kv.first.c_str());
+                        cJSON_AddStringToObject(one, "pose", kv.second.pose.c_str());
+                        cJSON_AddNumberToObject(one, "ms", kv.second.ms);
+                    }
+                }
+            }
+        }
+    }
     return send_json(req, root);
 }
 
@@ -769,11 +1014,13 @@ void start_httpd()
         {"/api/photo", HTTP_GET, handle_photo, nullptr},
         {"/api/touch-raw", HTTP_GET, handle_touch_raw, nullptr},
         {"/api/react", HTTP_POST, handle_react, nullptr},
+        {"/api/touch-spots", HTTP_GET, handle_touch_spots, nullptr},
         {"/api/status", HTTP_GET, handle_status, nullptr},
         {"/api/ram", HTTP_GET, handle_ram, nullptr},
         {"/api/log", HTTP_GET, handle_log, nullptr},
         {"/api/head", HTTP_POST, handle_head, nullptr},
         {"/api/led", HTTP_POST, handle_led, nullptr},
+        {"/api/leds", HTTP_POST, handle_leds, nullptr},
         {"/api/emotion", HTTP_POST, handle_emotion, nullptr},
         {"/api/say", HTTP_POST, handle_say, nullptr},
         {"/api/twitch", HTTP_POST, handle_twitch, nullptr},
@@ -781,6 +1028,7 @@ void start_httpd()
         {"/api/face-restore", HTTP_POST, handle_face_restore, nullptr},
         {"/api/reboot", HTTP_POST, handle_reboot, nullptr},
         {"/api/wake", HTTP_POST, handle_wake, nullptr},
+        {"/api/settings", HTTP_POST, handle_settings, nullptr},
     };
     for (const auto& route : routes) {
         httpd_register_uri_handler(_server, &route);
@@ -800,6 +1048,9 @@ void Hal::startControlServer()
         return;
     }
     registered = true;
+
+    // the saved light level, from the first frame
+    setRgbDimmer(hal_bridge::soma_setting("dimmer", 100));
 
     onHeadPetGesture.connect([this](HeadPetGesture gesture) {
         if (gesture == HeadPetGesture::SwipeForward || gesture == HeadPetGesture::SwipeBackward) {

@@ -51,6 +51,18 @@ button.small { padding:1px 6px; font-size:12px; }
 .muted { color:var(--dim); } .tiny { font-size:11px; }
 #stage { display:flex; flex-direction:column; align-items:center; gap:8px; }
 #screen { image-rendering:pixelated; border:1px solid var(--line); background:#000; cursor:crosshair; }
+#railWrap { display:flex; align-items:stretch; gap:6px; }
+.rail { width:10px; border:1px solid var(--line); border-radius:3px; background:#000; }
+#stage > section { width:100%; flex:none; }
+section.foldable > h2 { cursor:grab; user-select:none; }
+section.movingPanel { opacity:.45; }
+body.movingPanel, body.movingPanel * { cursor:grabbing !important; user-select:none; }
+.dropLine { flex:none; width:100%; height:4px; margin:2px 0 8px; background:var(--accent); border-radius:2px; }
+.headTop { position:relative; width:150px; margin:6px auto; }
+.headTop img { display:block; width:100%; }
+.headZone { position:absolute; left:9%; right:9%; display:flex; align-items:center; justify-content:center; gap:4px;
+  font-size:11px; color:#223; font-weight:600; border-radius:2px; }
+.headZone.on { background:rgba(255,160,60,.65); }
 #emotions { display:flex; flex-wrap:wrap; gap:4px; }
 #emotions button { padding:2px 7px; }
 #emotions button.on { background:var(--accent); color:#1b140e; }
@@ -103,6 +115,7 @@ section.foldable.collapsed > :not(h2) { display:none !important; }
   <button id="reload" title="Throw away unsaved changes and read this face from disk again">Reload</button>
   <button id="undo" title="Undo (Ctrl+Z)" disabled>Undo</button>
   <button id="redo" title="Redo (Ctrl+Y)" disabled>Redo</button>
+  <button id="resetPanels" title="Drag a panel by its title to move it. This puts them all back.">Reset panels</button>
   <button id="save" class="primary" title="Ctrl+S. The previous version is kept beside it.">Save</button>
   <span id="dirty"></span>
   <span class="muted tiny" id="where"></span>
@@ -117,12 +130,17 @@ section.foldable.collapsed > :not(h2) { display:none !important; }
 <main>
   <div class="col" id="left"></div>
   <div class="col" id="stage">
-    <canvas id="screen" width="960" height="720"></canvas>
+    <div id="railWrap" title="The rail lights this pose asks for">
+      <div class="rail" id="railL"></div>
+      <canvas id="screen" width="960" height="720"></canvas>
+      <div class="rail" id="railR"></div>
+    </div>
     <div class="row">
       <label><span>Zoom</span><select id="zoom"><option>1</option><option>2</option><option selected>3</option><option>4</option></select></label>
       <label><input type="checkbox" id="ovSockets" checked>sockets</label>
       <label><input type="checkbox" id="ovAnchors" checked>anchors</label>
       <label><input type="checkbox" id="ovGrid">centre lines</label>
+      <label><input type="checkbox" id="ovSpots" checked>touch spots</label>
       <button id="sheetBtn">All emotions</button>
       <button id="exportBtn" title="Saves every pose as a PNG, and one big sheet of them all, into an export folder beside the face">Export pictures</button>
     </div>
@@ -212,6 +230,7 @@ function resolve() {
     lidMode: f.lid_mode || "slide", irisMask: f.iris_mask || "socket", browsAbove: !!f.brows_above_eyes,
     sclera: e.sclera || "", iris: e.iris || "", socket: e.socket_size || [56, 48],
     parallax: e.iris_parallax ?? 25, travelSet: e.iris_travel || null, radius: e.clip_radius || 0,
+    glanceLag: clamp(e.glance_lag_ms ?? 40, 0, 300),
     rpos: e.right_pos || [52, -18], lpos: e.left_pos || [-52, -18],
     upper: e.lids_upper || {}, lower: e.lids_lower || {},
     mpos: m.pos || [0, 46], mtravel: m.travel || [8, 6], shapes: m.shapes || {},
@@ -220,7 +239,8 @@ function resolve() {
     decorators: p.decorators || {},
   };
   const s = size(sideOf(F.sclera, "right") || sideOf(F.sclera, "left")), i = size(sideOf(F.iris, "right") || sideOf(F.iris, "left"));
-  F.travel = F.travelSet || (s && i ? [Math.max(0, Math.floor((s.w - i.w) / 2)), Math.max(0, Math.floor((s.h - i.h) / 2))] : [12, 8]);
+  F.fit = { left: irisFit(F, "left"), right: irisFit(F, "right") };
+  F.travel = F.fit.right.travel;
   F.emotions = emotions(F);
   return F;
 }
@@ -295,6 +315,36 @@ const INSPECT = { xray: false, outlines: false, sweep: false };
 let RECTS = [];
 const RECT_COLOUR = { sclera: "#ffffff", iris: "#4fc3ff", lower: "#ffb14a", upper: "#ff6a5a", brows: "#b48cff",
                       mouth: "#7cc48a", hair: "#c8a06a", decorator: "#ff7ad9", socket: "#78c8ff" };
+// The drawn part of an image, [x0, y0, x1, y1], or null: face.py's getbbox on the alpha.
+const BOXES = new WeakMap();
+function opaqueBox(img) {
+  if (!img) return null;
+  if (BOXES.has(img)) return BOXES.get(img);
+  const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+  const x = c.getContext("2d"); x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height).data;
+  let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+  for (let y = 0; y < c.height; y++) for (let xx = 0; xx < c.width; xx++) {
+    if (d[(y * c.width + xx) * 4 + 3]) { if (xx < x0) x0 = xx; if (xx > x1) x1 = xx; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  const b = x1 < 0 ? null : [x0, y0, x1 + 1, y1 + 1];
+  BOXES.set(img, b);
+  return b;
+}
+// face.py's Compositor.iris_fit: the iris rests in the middle of the drawn eye white, and a full look
+// takes its middle half an iris past the white's edge. room: how far it goes and stays inside.
+function irisFit(F, side) {
+  const s = eyeSprite(F, F.sclera, side), i = eyeSprite(F, F.iris, side);
+  const sb = opaqueBox(s), ib = opaqueBox(i);
+  if (!sb || !ib) return { offset: [0, 0], travel: F.travelSet || [12, 8], room: null };
+  const [sw, sh] = F.socket;
+  const sx = centred(sw, s.width), sy = centred(sh, s.height), ix = centred(sw, i.width), iy = centred(sh, i.height);
+  const ww = sb[2] - sb[0], wh = sb[3] - sb[1], iw = ib[2] - ib[0], ih = ib[3] - ib[1];
+  return {
+    offset: [Math.round(sx + (sb[0] + sb[2]) / 2 - ix - (ib[0] + ib[2]) / 2), Math.round(sy + (sb[1] + sb[3]) / 2 - iy - (ib[1] + ib[3]) / 2)],
+    travel: F.travelSet || [Math.round(ww / 2 + iw / 2), Math.round(wh / 2 + ih / 2)],
+    room: [Math.max(0, Math.trunc((ww - iw) / 2)), Math.max(0, Math.trunc((wh - ih) / 2))] };
+}
 function eyeSprite(F, val, side) {
   // one image for both: the side that wasn't drawn is its mirror
   return sprite(sideOf(val, side), !perSide(val) && F.mirror && side !== F.drawn);
@@ -338,6 +388,8 @@ function tick(now) {
   // IdleExpressionModifier: every 2..6 s: 70% glance, 10% mouth tilt, 20% back to neutral
   if (LIVE.idle && now >= LIVE.nextIdle) {
     const a = rint(0, 100);
+    // Wren's right eye (screen left) leads; the other one catches up the face's glance lag later
+    LIVE.idlePrev = LIVE.idleGaze; LIVE.idleLagUntil = now + (DOC ? resolve().glanceLag : 40);
     if (a < 70) { LIVE.idleGaze = [rint(-20, 20), rint(-15, 15)]; LIVE.idleMouth = [0, rint(0, 10)]; }
     else if (a < 80) LIVE.idleRot = rint(-30, 30);
     else { LIVE.idleGaze = [0, 0]; LIVE.idleMouth = [0, 0]; LIVE.idleRot = 0; }
@@ -348,6 +400,16 @@ function tick(now) {
   if (now >= LIVE.nextPulse) { LIVE.pulseIdx ^= 1; LIVE.nextPulse = now + 500; }
 }
 
+// CustomAvatar::tickRoll: over the top, side to side, once as the pose starts
+function rollNow(pose, now) {
+  const ms = pose.motion && pose.motion.roll;
+  if (LIVE.rollEmo !== EMO) { LIVE.rollEmo = EMO; LIVE.rollT0 = now; }
+  if (!ms) return [0, 0];
+  const t = now - LIVE.rollT0;
+  if (t >= ms) return [0, 0];
+  const s = t / ms, r = 90 * Math.min(1, 4 * s, 4 * (1 - s)), a = (160 - 140 * s) * Math.PI / 180;
+  return [Math.trunc(r * Math.cos(a)), Math.trunc(-r * Math.sin(a))];
+}
 function state(F, now) {
   const pose = F.emotions[EMO] || F.emotions.neutral;
   // BreathModifier: sin over 6600 ms, amplitude 16, added to eye and mouth position.y
@@ -356,8 +418,13 @@ function state(F, now) {
   const g = sweep || (LIVE.mouse ? LIVE.mouseGaze : (LIVE.idle ? LIVE.idleGaze : LIVE.gaze));
   let w = LIVE.eyeOverride ?? pose.eyeOpen;
   if (LIVE.blinkClosed) w = 25;
-  return { pose, eyeWeight: w, mouthWeight: LIVE.mouthWeight, twitch: twitchNow(pose, now),
-    eyePos: [clamp(g[0], -100, 100), clamp(g[1] + breath, -100, 100)],
+  const cycle = !LIVE.talk && pose.motion && pose.motion.mouth_cycle;
+  const roll = rollNow(pose, now);   // also notes when this pose started, which the mouth and the rails count from
+  return { pose, eyeWeight: w, mouthWeight: cycle ? Math.round(50 - 50 * Math.cos(2 * Math.PI * ((now - LIVE.rollT0) % cycle) / cycle)) : LIVE.mouthWeight, twitch: twitchNow(pose, now),
+    // a sprite face's eyes don't breathe (BreathModifier skips them): the y is where the iris looks
+    eyePos: [clamp(g[0], -100, 100), clamp(g[1], -100, 100)],
+    eyePosR: !sweep && !LIVE.mouse && LIVE.idle && now < (LIVE.idleLagUntil || 0) ? LIVE.idlePrev : null,
+    roll,
     mouthPos: [LIVE.idleMouth[0], LIVE.idleMouth[1] + breath], mouthRot: LIVE.idleRot,
     decRot: LIVE.pulse ? [150, 200][LIVE.pulseIdx] : 150 };
 }
@@ -367,14 +434,19 @@ function rotated(ctx, img, cx, cy, tenths) {
   ctx.save(); ctx.translate(cx, cy); ctx.rotate(tenths / 10 * Math.PI / 180);
   ctx.drawImage(img, -img.width / 2, -img.height / 2); ctx.restore();
 }
+// a pair that's the same on both sides, or {left, right} per side: a pose's look and brow
+const pairOf = (v, side) => !v ? [0, 0] : (Array.isArray(v) ? v : (v[side] || [0, 0]));
 function eye(ctx, F, st, isLeft) {
   const side = isLeft ? "left" : "right";
   const anchor = isLeft ? F.lpos : F.rpos;
   const [sw, sh] = F.socket;
-  const ix = mapRange(st.eyePos[0], -100, 100, -F.travel[0], F.travel[0]);
-  const iy = mapRange(st.eyePos[1], -100, 100, -F.travel[1], F.travel[1]);
-  const sx = centred(SW, sw) + anchor[0] + Math.trunc(ix * F.parallax / 100);
-  const sy = centred(SH, sh) + anchor[1] + Math.trunc(iy * F.parallax / 100);
+  const fit = F.fit[side], ep = isLeft ? st.eyePos : (st.eyePosR || st.eyePos), roll = st.roll || [0, 0];
+  const ix = mapRange(clamp(ep[0] + pairOf(st.pose.look, side)[0] + roll[0], -100, 100), -100, 100, -fit.travel[0], fit.travel[0]);
+  const iy = mapRange(clamp(ep[1] + pairOf(st.pose.look, side)[1] + roll[1], -100, 100), -100, 100, -fit.travel[1], fit.travel[1]);
+  // the socket follows the gaze only as far as the iris stays in the white (EyeRig::setPosition)
+  const fx = fit.room ? clamp(ix, -fit.room[0], fit.room[0]) : ix, fy = fit.room ? clamp(iy, -fit.room[1], fit.room[1]) : iy;
+  const sx = centred(SW, sw) + anchor[0] + Math.trunc(fx * F.parallax / 100);
+  const sy = centred(SH, sh) + anchor[1] + Math.trunc(fy * F.parallax / 100);
   if (!SHOW[side]) return [sx, sy, sw, sh];
   const sock = document.createElement("canvas"); sock.width = sw; sock.height = sh;
   const c = sock.getContext("2d");
@@ -387,7 +459,7 @@ function eye(ctx, F, st, isLeft) {
   if (s && SHOW.sclera) { c.drawImage(s, scx, scy); box("sclera", s, scx, scy); }
   const i = eyeSprite(F, F.iris, side);
   if (i && SHOW.iris) {
-    const ixp = centred(sw, i.width) + ix, iyp = centred(sh, i.height) + iy;
+    const ixp = centred(sw, i.width) + ix + fit.offset[0], iyp = centred(sh, i.height) + iy + fit.offset[1];
     if (F.irisMask === "sclera" && s) {
       // the iris only shows where the eye white is
       const t = document.createElement("canvas"); t.width = sw; t.height = sh;
@@ -424,9 +496,9 @@ function render(ctx, F, st) {
   const b = SHOW.base && sprite(st.pose.base || F.base); if (b) ctx.drawImage(b, centred(SW, b.width), centred(SH, b.height));
   const brows = () => {
     if (!SHOW.brows) return;
-    const brow = st.pose.brow || [0, 0];
     for (const side of SIDES) {
       if (!SHOW[side]) continue;
+      const brow = pairOf(st.pose.brow, side);
       const img = browSprite(F, st.pose.browS ? st.pose.browS[side] : "neutral", side);
       if (!img) continue;
       const pos = side === "left" ? F.blpos : F.brpos, tilt = side === "left" ? brow[1] : -brow[1];
@@ -494,11 +566,25 @@ function anchors(F) {
   }
   return list;
 }
+let RAILS_SHOWN = null;
+function paintRails(pose, now) {
+  const L = pose && pose.lights, key = L ? `${L.color}/${L.brightness ?? 40}/${L.pulse || 0}` : "";
+  if (key === RAILS_SHOWN && !(L && L.pulse)) return;
+  RAILS_SHOWN = key;
+  // the same breath as the robot: full, down to 15%, back
+  const since = now - (LIVE.rollT0 ?? now);
+  const breath = L && L.pulse ? 0.15 + 0.85 * (0.5 + 0.5 * Math.cos(2 * Math.PI * (since % L.pulse) / L.pulse)) : 1;
+  for (const r of [$("#railL"), $("#railR")]) {
+    r.style.background = L ? L.color : "#000";
+    r.style.opacity = L ? (0.35 + 0.65 * (L.brightness ?? 40) / 100) * breath : 1;
+  }
+}
 function draw() {
   if (!DOC) return;
   const now = performance.now(), F = resolve();
   tick(now);
   const st = state(F, now);
+  paintRails(st.pose, now);
   const sockets = render(octx, F, st);
   sctx.imageSmoothingEnabled = false;
   sctx.drawImage(off, 0, 0, SW * ZOOM, SH * ZOOM);
@@ -512,6 +598,25 @@ function draw() {
   if ($("#ovGrid").checked) {
     sctx.strokeStyle = "rgba(255,255,255,.18)"; sctx.beginPath();
     sctx.moveTo(SW / 2 * z, 0); sctx.lineTo(SW / 2 * z, SH * z); sctx.moveTo(0, SH / 2 * z); sctx.lineTo(SW * z, SH / 2 * z); sctx.stroke();
+  }
+  if ($("#ovSpots").checked || SPOT_DRAW) {
+    sctx.lineWidth = 2; sctx.font = "12px system-ui"; sctx.textAlign = "left";
+    for (const [name, s] of Object.entries(DOC.touch || {})) {
+      const r = s.rect; if (!r || r.length !== 4) continue;
+      sctx.strokeStyle = sctx.fillStyle = spotProblem(s) ? "#ff6a5a" : (name === SPOT_DRAW ? "#ffcf5a" : "#7cc48a");
+      sctx.strokeRect(r[0] * z + .5, r[1] * z + .5, r[2] * z, r[3] * z);
+      const how = { drag: " (drag)", left: " ←", right: " →", up: " ↑", down: " ↓" }[s.gesture] || "";
+      sctx.fillText(`${name}${how} → ${s.pose || "?"}`, r[0] * z + 4, r[1] * z + 14);
+      if (s.mirror) {
+        sctx.setLineDash([6, 4]);
+        sctx.strokeRect((SW - r[0] - r[2]) * z + .5, r[1] * z + .5, r[2] * z, r[3] * z);
+        sctx.setLineDash([]);
+      }
+    }
+    if (SPOT_SNAPPED) {
+      sctx.strokeStyle = "#ffcf5a"; sctx.beginPath(); sctx.moveTo(SW / 2 * z, 0); sctx.lineTo(SW / 2 * z, SH * z); sctx.stroke();
+    }
+    sctx.lineWidth = 1;
   }
   if ($("#ovSockets").checked) {
     sctx.strokeStyle = "rgba(120,200,255,.6)";
@@ -556,7 +661,26 @@ function setAnchor(key, x, y, rebuild = true) {
   dirty(); if (rebuild) buildLeft();
 }
 let DRAG = null;
+// Touch spots are drawn on the screen, in screen pixels from the top left, as the firmware reads a tap.
+const MIN_SPOT = 40;       // about 5 mm on this panel: narrower than a fingertip, and it gets missed
+let SPOT_DRAW = null, SPOT_DRAG = null, SPOT_SNAPPED = false;
+const SPOT_SNAP = 8;       // this close to centered, a spot snaps to it; Alt turns that off
+function spotProblem(s) {
+  const r = s.rect || [];
+  if (r.length !== 4) return "no rectangle yet";
+  if (r[2] < MIN_SPOT || r[3] < MIN_SPOT) return `only ${r[2]}x${r[3]} px: a fingertip is wider than ${MIN_SPOT}, so it'll get missed`;
+  return "";
+}
+function screenPoint(ev) {
+  const r = screen.getBoundingClientRect();
+  return [clamp(Math.round((ev.clientX - r.left) / ZOOM), 0, SW), clamp(Math.round((ev.clientY - r.top) / ZOOM), 0, SH)];
+}
 screen.addEventListener("mousedown", ev => {
+  if (SPOT_DRAW && DOC.touch && DOC.touch[SPOT_DRAW]) {
+    SPOT_DRAG = screenPoint(ev);
+    DOC.touch[SPOT_DRAW].rect = [SPOT_DRAG[0], SPOT_DRAG[1], 0, 0];
+    return;
+  }
   const F = resolve(), r = screen.getBoundingClientRect();
   const mx = (ev.clientX - r.left) / ZOOM - SW / 2, my = (ev.clientY - r.top) / ZOOM - SH / 2;
   let best = null, bd = 12;
@@ -565,12 +689,24 @@ screen.addEventListener("mousedown", ev => {
   if (best) DRAG = { key: best[0], dx: best[1][0] - mx, dy: best[1][1] - my };
 });
 window.addEventListener("mousemove", ev => {
+  if (SPOT_DRAG) {
+    const [x, y] = screenPoint(ev);
+    const r2 = [Math.min(x, SPOT_DRAG[0]), Math.min(y, SPOT_DRAG[1]), Math.abs(x - SPOT_DRAG[0]), Math.abs(y - SPOT_DRAG[1])];
+    SPOT_SNAPPED = !ev.altKey && r2[2] > 0 && Math.abs(r2[0] + r2[2] / 2 - SW / 2) <= SPOT_SNAP;
+    if (SPOT_SNAPPED) { r2[2] -= r2[2] % 2; r2[0] = SW / 2 - r2[2] / 2; }   // pixels: only an even width can truly center
+    DOC.touch[SPOT_DRAW].rect = r2;
+    return;
+  }
   const r = screen.getBoundingClientRect();
   const mx = (ev.clientX - r.left) / ZOOM - SW / 2, my = (ev.clientY - r.top) / ZOOM - SH / 2;
   if (LIVE.mouse) LIVE.mouseGaze = [clamp(Math.round(mx / (SW / 2) * 100), -100, 100), clamp(Math.round(my / (SH / 2) * 100), -100, 100)];
   if (DRAG) setAnchor(DRAG.key, Math.round(mx + DRAG.dx), Math.round(my + DRAG.dy), false);
 });
-window.addEventListener("mouseup", () => { if (DRAG) buildLeft(); DRAG = null; });
+window.addEventListener("mouseup", () => {
+  if (SPOT_DRAG) { SPOT_DRAG = null; SPOT_DRAW = null; SPOT_SNAPPED = false; screen.style.cursor = ""; dirty(); buildLeft(); return; }
+  if (DRAG) buildLeft();
+  DRAG = null;
+});
 window.addEventListener("keydown", ev => {
   if (!SEL || ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
   const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
@@ -585,10 +721,69 @@ window.addEventListener("keydown", ev => {
 // What's folded is remembered in the browser, and survives the panels being rebuilt on every edit.
 const FOLDS = JSON.parse(localStorage.studioFolds || "{}");
 // first time here: the face and the pose are open, the rest is out of the way until it's wanted
-const FOLDED_AT_FIRST = new Set(["eyes", "mouth", "brows", "decorators", "motion preview", "robot"]);
+const FOLDED_AT_FIRST = new Set(["eyes", "mouth", "brows", "decorators", "touch spots", "head touches", "motion preview", "robot"]);
 function isFolded(key, fallback) { return key in FOLDS ? FOLDS[key] : fallback; }
 function setFolded(key, on) { FOLDS[key] = on; localStorage.studioFolds = JSON.stringify(FOLDS); }
 const isControl = ev => ev.target.closest("button, input, select, label, summary");
+// Any panel can be dragged by its title to anywhere in any column. Where they went is kept in the
+// browser, and put back after every rebuild; each panel remembers which builder owns it.
+const COLUMNS = ["left", "stage", "right"];
+let LAYOUT = JSON.parse(localStorage.studioLayout || "null");
+const sectionKey = sec => { const h = sec.querySelector(":scope > h2"); return h ? h.firstChild.textContent.split(/[:(]/)[0].trim().toLowerCase() : ""; };
+const columnSections = c => [...$("#" + c).querySelectorAll(":scope > section")];
+function applyLayout() {
+  if (!LAYOUT) return;
+  const all = new Map();
+  for (const c of COLUMNS) for (const s of columnSections(c)) all.set(sectionKey(s), s);
+  for (const c of COLUMNS) for (const key of LAYOUT[c] || []) {
+    if (all.has(key)) { $("#" + c).append(all.get(key)); all.delete(key); }
+  }
+  for (const s of all.values()) s.parentElement.append(s);   // a panel the layout hasn't heard of goes last
+}
+function clearHome(home) { for (const s of document.querySelectorAll(`main section[data-home="${home}"]`)) s.remove(); }
+function settle(home) {
+  for (const s of columnSections(home)) if (!s.dataset.home) s.dataset.home = home;
+  for (const c of COLUMNS) foldSections($("#" + c));
+  applyLayout();
+}
+document.querySelector("main").addEventListener("pointerdown", ev => {
+  const h = ev.target.closest("section.foldable > h2");
+  if (!h || ev.button || isControl(ev)) return;
+  const sec = h.parentElement, x0 = ev.clientX, y0 = ev.clientY;
+  let line = null;
+  const move = e => {
+    if (!line) {
+      if (Math.hypot(e.clientX - x0, e.clientY - y0) < 6) return;
+      line = el("div", { class: "dropLine" });
+      sec.classList.add("movingPanel"); document.body.classList.add("movingPanel");
+    }
+    const c = COLUMNS.find(id => { const r = $("#" + id).getBoundingClientRect(); return e.clientX >= r.left && e.clientX <= r.right; });
+    if (!c) return;
+    const col = $("#" + c), r = col.getBoundingClientRect();
+    if (e.clientY < r.top + 36) col.scrollTop -= 14; else if (e.clientY > r.bottom - 36) col.scrollTop += 14;
+    const before = columnSections(c).find(s => s !== sec && e.clientY < s.getBoundingClientRect().top + s.getBoundingClientRect().height / 2);
+    col.insertBefore(line, before || null);
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up);
+    if (!line) return;
+    sec.classList.remove("movingPanel"); document.body.classList.remove("movingPanel");
+    if (line.parentElement) line.replaceWith(sec);
+    LAYOUT = Object.fromEntries(COLUMNS.map(c => [c, columnSections(c).map(sectionKey)]));
+    localStorage.studioLayout = JSON.stringify(LAYOUT);
+    // that was a move, not a click on the title: don't fold it as well
+    const swallow = e => { e.stopPropagation(); e.preventDefault(); };
+    window.addEventListener("click", swallow, { capture: true, once: true });
+    setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
+  };
+  window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
+});
+for (const s of columnSections("stage")) s.dataset.home = "stage";
+$("#resetPanels").onclick = () => {
+  LAYOUT = null; delete localStorage.studioLayout;
+  for (const s of document.querySelectorAll('main section[data-home="stage"]')) $("#stage").append(s);
+  buildAll();
+};
 function foldSections(root) {
   for (const sec of root.querySelectorAll(":scope > section")) {
     const h = sec.querySelector(":scope > h2"); if (!h) continue;
@@ -727,9 +922,9 @@ function dirty(on = true) {
 }
 
 // ----------------------------------------------------------------- left: the parts
-function buildLeft() {
-  const L = $("#left"); L.innerHTML = "";
-  queueMicrotask(() => foldSections(L));
+function buildLeft() { clearHome("left"); buildLeftPanels(); settle("left"); }
+function buildLeftPanels() {
+  const L = $("#left");
   const f = DOC.face = DOC.face || {};
   const F = resolve();
   L.append(el("section", {}, el("h2", {}, "Face"),
@@ -757,6 +952,8 @@ function buildLeft() {
     pair("Socket size", () => F.socket, v => e.socket_size = v),
     num("Clip radius", () => F.radius, v => e.clip_radius = v),
     num("Iris parallax %", () => F.parallax, v => e.iris_parallax = v),
+    num("Glance lag (ms)", () => F.glanceLag, v => e.glance_lag_ms = clamp(Math.round(v) || 0, 0, 300), 10),
+    el("div", { class: "muted tiny" }, "In a glance Wren's right eye (screen left) leads and the other lands this much later. 0 moves them together."),
     el("label", {}, el("span", {}, "Iris travel"), el("input", { type: "checkbox", checked: !!e.iris_travel,
       onchange: ev => { if (ev.target.checked) e.iris_travel = [...F.travel]; else delete e.iris_travel; dirty(); buildLeft(); } }),
       el("span", { class: "muted tiny" }, e.iris_travel ? "set by hand" : `auto ${F.travel.join(" x ")}`)),
@@ -792,6 +989,8 @@ function buildLeft() {
     pair("Right pos", () => F.brpos, v => { b.right_pos = v; if ($("#symLock").checked) b.left_pos = [-v[0], v[1]]; }),
     pair("Left pos", () => F.blpos, v => { b.left_pos = v; if ($("#symLock").checked) b.right_pos = [-v[0], v[1]]; })));
 
+  L.append(touchPanel(F));
+  L.append(headPanel(F));
   const d = sect("decorators");
   L.append(el("section", {}, el("h2", {}, "Decorators"),
     namedMap("Shown when an emotion names them. Pulse wobbles 15° to 20° every half second.", d,
@@ -809,6 +1008,89 @@ function buildLeft() {
           [fileSel("Image", () => s.image, v => s.image = v, false), el("label", {}, el("span", {}, "Anchor"), anc),
            pair("Offset", () => s.offset || [0, 0], v => s.offset = v), el("label", {}, el("span", {}, "Animate"), ani)]);
       })));
+}
+function touchPanel(F) {
+  const t = DOC.touch || {}, poses = Object.keys(F.emotions);
+  const rows = Object.keys(t).map(name => {
+    const s = t[name], problem = spotProblem(s);
+    const sel = el("select", { onchange: ev => { s.pose = ev.target.value; dirty(); } }, ...poses.map(p => el("option", { value: p }, p)));
+    sel.value = s.pose;
+    const drawing = SPOT_DRAW === name;
+    return el("div", { class: "sub" },
+      el("div", { class: "row" }, el("b", {}, name),
+        el("button", { class: "small" + (drawing ? " primary" : ""), onclick: () => { SPOT_DRAW = drawing ? null : name; screen.style.cursor = SPOT_DRAW ? "cell" : ""; buildLeft(); } }, drawing ? "drag on the screen…" : "draw"),
+        el("button", { class: "small", onclick: () => { if (confirm(`Remove touch spot ${name}?`)) { delete t[name]; if (SPOT_DRAW === name) SPOT_DRAW = null; dirty(); buildLeft(); } } }, "×")),
+      el("label", {}, el("span", {}, "Shows"), sel),
+      (() => {
+        const g = el("select", { onchange: ev => { s.gesture = ev.target.value; dirty(); } },
+          ...[["tap", "a tap"], ["drag", "a drag, any way"], ["left", "a drag left"], ["right", "a drag right"], ["up", "a drag up"], ["down", "a drag down"]].map(([v, txt]) => el("option", { value: v }, txt)));
+        g.value = s.gesture || "tap";
+        return el("label", {}, el("span", {}, "Fires on"), g);
+      })(),
+      el("label", {}, el("input", { type: "checkbox", checked: !!s.mirror, onchange: ev => { if (ev.target.checked) s.mirror = true; else delete s.mirror; dirty(); } }),
+        el("span", { class: "tiny" }, "mirror it on the other side")),
+      num("For (ms)", () => s.ms ?? 2000, v => s.ms = clamp(v, 200, 15000), 100),
+      ...(s.rect ? [pair("At x, y", () => s.rect.slice(0, 2), v => { s.rect[0] = v[0]; s.rect[1] = v[1]; }), pair("Size", () => s.rect.slice(2), v => { s.rect[2] = v[0]; s.rect[3] = v[1]; })] : []),
+      ...(problem ? [el("div", { class: "w tiny" }, problem)] : []));
+  });
+  return el("section", {}, el("h2", {}, "Touch spots"),
+    el("div", { class: "muted tiny" }, "Tap one of these on the robot and it shows that pose, then goes back. Anywhere else is tap to talk. The first one in the list wins where they overlap."),
+    ...rows,
+    el("button", { class: "small", onclick: () => {
+      const n = prompt("Name this spot (e.g. boop, forehead kiss, cheek):"); if (!n || !n.trim()) return;
+      const name = n.trim();
+      if (t[name]) { alert(`There's already a spot called ${name}.`); return; }
+      DOC.touch = t;   // only now: a face that hasn't made any doesn't say anything about them
+      t[name] = { pose: poses.includes("happy") ? "happy" : poses[0], ms: 2000 };
+      SPOT_DRAW = name; screen.style.cursor = "cell"; dirty(); buildLeft();
+    } }, "+ add spot"));
+}
+// What a touch on top of the head shows. The voice server reads the kind of touch, about a second late.
+const HEAD_KINDS = [["stroke_front_to_back", "Stroke, front to back"], ["stroke_back_to_front", "Stroke, back to front"],
+                    ["poke_front", "Poke, front"], ["poke_middle", "Poke, middle"], ["poke_back", "Poke, back"],
+                    ["finger_rest", "Finger resting"], ["hand", "Whole hand"], ["scritch", "Scritches"]];
+// Where each kind of touch lands, on the picture of the top of the head. Percent of its height, face end first.
+const HEAD_ZONES = { front: [25.5, 22], mid: [48.5, 23.5], back: [72.5, 22] };
+const HEAD_LABELS = { front: "Front", mid: "Middle", back: "Back" };
+const HEAD_LANDS = { stroke_front_to_back: "all", stroke_back_to_front: "all", poke_front: "front", poke_middle: "mid", poke_back: "back",
+                     finger_rest: "one", hand: "all", scritch: "all" };
+function headPicture() {
+  const zones = {};
+  const pic = el("div", { class: "headTop" }, el("img", { src: "/stackChanTop.png", alt: "The top of the head, face end at the top" }));
+  for (const [z, [top, height]] of Object.entries(HEAD_ZONES)) {
+    zones[z] = el("div", { class: "headZone", style: `top:${top}%;height:${height}%` }, el("span", { class: "label" }, HEAD_LABELS[z]));
+    pic.append(zones[z]);
+  }
+  pic.showKind = kind => {
+    const lands = HEAD_LANDS[kind];
+    const arrow = kind === "stroke_front_to_back" ? " ↓" : kind === "stroke_back_to_front" ? " ↑" : "";
+    for (const z of Object.keys(zones)) {
+      const on = !!kind && (lands === "all" || lands === z);
+      zones[z].classList.toggle("on", on);
+      zones[z].querySelector(".label").textContent = HEAD_LABELS[z] + (on ? arrow : "");
+    }
+  };
+  return pic;
+}
+function headPanel(F) {
+  const poses = Object.keys(F.emotions), h = DOC.head || {}, pic = headPicture();
+  return el("section", {}, el("h2", {}, "Head touches"),
+    el("div", { class: "muted tiny", style: "text-align:center" }, "↑ face end"), pic,
+    el("div", { class: "muted tiny" }, "Once any of these is set, only these answer, and the stock happy face for a pet goes away. Press isn't readable: a light brush looks the same as a firm one."),
+    ...HEAD_KINDS.map(([kind, label]) => {
+      const s = el("select", { onchange: ev => {
+        const v = ev.target.value;
+        DOC.head = DOC.head || {};
+        if (v) DOC.head[kind] = { pose: v, ms: (DOC.head[kind] || {}).ms || 2000 }; else delete DOC.head[kind];
+        if (!Object.keys(DOC.head).length) delete DOC.head;
+        dirty(); buildLeft();
+      } }, el("option", { value: "" }, "(nothing)"), ...poses.map(p => el("option", { value: p }, p)));
+      s.value = (h[kind] || {}).pose || "";
+      const row = el("label", {}, el("span", {}, label), s);
+      row.onmouseenter = () => pic.showKind(kind);
+      row.onmouseleave = () => pic.showKind(null);
+      return row;
+    }));
 }
 function lidMap(title, key) {
   const e = sect("eyes"); e[key] = e[key] || {};
@@ -866,14 +1148,16 @@ function robotPanel(pose) {
     el("label", {}, el("span", {}, "Address"), el("input", { type: "text", style: "flex:1;min-width:0", value: BOT.url, onchange: ev => saveBot({ url: ev.target.value }) })),
     el("label", {}, el("span", {}, "Token"), el("input", { type: "password", style: "flex:1;min-width:0", placeholder: BOT.hasToken ? "saved" : "none", onchange: ev => { saveBot({ token: ev.target.value }); ev.target.value = ""; } })),
     el("div", { class: "row" },
-      act("Try this pose", "Show this pose and its twitch on the robot, from the face it already has", async () => {
+      act("Try this pose", "Show this pose on the robot with its twitch, rail color, look and brow moves as they are here, using the art it already has", async () => {
         const tw = pose.motion && pose.motion.twitch;
         botSay("Asking the robot…");
-        await api("/api/bot/try", { method: "POST", body: JSON.stringify({ name: EMO, twitch: tw || null }) });
+        await api("/api/bot/try", { method: "POST", body: JSON.stringify({ name: EMO, twitch: tw || null, lights: pose.lights || null,
+          look: pose.look || null, brow: pose.brow || null, mouthCycle: (pose.motion && pose.motion.mouth_cycle) || 0,
+          roll: (pose.motion && pose.motion.roll) || 0 }) });
         botSay(`Showing ${EMO} on the robot.`);
       }),
       act("Send this face", "Save, build it, send it over, reboot. The old face stays on the card.", async () => {
-        if (DIRTY) await saveFace();
+        if (DIRTY && !(await saveFace())) { botSay("Not sent: the face wasn't saved."); return; }
         await api(`/api/bot/send?dir=${encodeURIComponent(DIR)}`, { method: "POST", body: "{}" });
         await watchBotJob();
       }, true),
@@ -888,8 +1172,9 @@ function robotPanel(pose) {
 }
 
 let DEC_OPEN = false, DEC_SCROLL = 0;
-function buildRight() {
-  const R = $("#right"); R.innerHTML = "";
+function buildRight() { clearHome("right"); buildRightPanels(); settle("right"); }
+function buildRightPanels() {
+  const R = $("#right");
   const F = resolve(), over = DOC.emotions || {};
   const pose = F.emotions[EMO] || F.emotions.neutral;
   const list = el("div", { id: "emotions" });
@@ -945,9 +1230,48 @@ function buildRight() {
     ...(Object.keys(F.browShapes).length ? [sided("Brow shape", "brow_shape", Object.keys(F.browShapes), pose.browS)] : []),
     slider("Eye open", () => pose.eyeOpen, v => { o().eyeOpen = v; LIVE.eyeOverride = null; }, 0, 100),
     ...(F.lidMode === "swap" ? [el("div", { class: "muted tiny" }, "Swap lids: the pose's lids show as drawn. Eye open below 50 shows 'closed' (a blink is 25).")] : []),
-    slider("Brow y", () => (pose.brow || [0, 0])[0], v => { o().brow = [v, (pose.brow || [0, 0])[1]]; pose.brow = o().brow; }, -30, 30),
-    slider("Brow tilt", () => (pose.brow || [0, 0])[1], v => { o().brow = [(pose.brow || [0, 0])[0], v]; pose.brow = o().brow; }, -300, 300),
-    el("div", { class: "muted tiny" }, "Tilt is tenths of a degree (140 = 14°), mirrored on the right brow."),
+    ...(() => {
+      const linked = !pose.brow || Array.isArray(pose.brow);
+      const together = el("label", {}, el("input", { type: "checkbox", checked: linked, onchange: ev => {
+        const l = pairOf(pose.brow, "left");
+        o().brow = ev.target.checked ? [...l] : { left: [...l], right: [...pairOf(pose.brow, "right")] };
+        dirty(); buildRight();
+      } }), "Brows move together");
+      const note = el("div", { class: "muted tiny" }, "Tilt is tenths of a degree (140 = 14°), mirrored on the right brow, so the same number is the same expression.");
+      if (linked) return [together,
+        slider("Brow y", () => pairOf(pose.brow, "left")[0], v => { o().brow = [v, pairOf(pose.brow, "left")[1]]; pose.brow = o().brow; }, -30, 30),
+        slider("Brow tilt", () => pairOf(pose.brow, "left")[1], v => { o().brow = [pairOf(pose.brow, "left")[0], v]; pose.brow = o().brow; }, -300, 300), note];
+      const edit = (side, i, v) => { const b = { left: [...pairOf(pose.brow, "left")], right: [...pairOf(pose.brow, "right")] }; b[side][i] = v; o().brow = b; pose.brow = b; };
+      const one = (side, name) => [
+        slider(`${name} brow y`, () => pairOf(pose.brow, side)[0], v => edit(side, 0, v), -30, 30),
+        slider(`${name} brow tilt`, () => pairOf(pose.brow, side)[1], v => edit(side, 1, v), -300, 300)];
+      return [together, ...one("left", "Left"), ...one("right", "Right"), note];
+    })(),
+    (() => {
+      // where this pose's eyes look, each its own if it wants; saved with the face
+      const linked = !pose.look || Array.isArray(pose.look);
+      const box = el("div", { class: "sub" });
+      const set = v => { o().look = v; pose.look = v; };
+      box.append(el("div", { class: "row" }, el("span", { class: "muted" }, "Eyes look"),
+        el("button", { class: "small", title: "Each eye toward the middle", onclick: () => { set({ left: [70, 0], right: [-70, 0] }); dirty(); buildRight(); } }, "cross-eyed"),
+        el("button", { class: "small", title: "Straight ahead", onclick: () => { delete o().look; dirty(); buildRight(); } }, "center")),
+        el("label", {}, el("input", { type: "checkbox", checked: linked, onchange: ev => {
+          const l = pairOf(pose.look, "left");
+          set(ev.target.checked ? [...l] : { left: [...l], right: [...pairOf(pose.look, "right")] });
+          dirty(); buildRight();
+        } }), "Both eyes together"));
+      if (linked) box.append(
+        slider("Look x", () => pairOf(pose.look, "left")[0], v => set([v, pairOf(pose.look, "left")[1]]), -100, 100),
+        slider("Look y", () => pairOf(pose.look, "left")[1], v => set([pairOf(pose.look, "left")[0], v]), -100, 100));
+      else {
+        const edit = (side, i, v) => { const b = { left: [...pairOf(pose.look, "left")], right: [...pairOf(pose.look, "right")] }; b[side][i] = v; set(b); };
+        for (const [side, name] of [["left", "Left"], ["right", "Right"]]) box.append(
+          slider(`${name} eye x`, () => pairOf(pose.look, side)[0], v => edit(side, 0, v), -100, 100),
+          slider(`${name} eye y`, () => pairOf(pose.look, side)[1], v => edit(side, 1, v), -100, 100));
+      }
+      box.append(el("div", { class: "muted tiny" }, "Sides are screen sides. This adds to wherever the gaze already is."));
+      return box;
+    })(),
     (() => {
       // a whole-face swap (the clown): this pose's own backdrop, or the face's
       const sel = el("select", { onchange: ev => { if (ev.target.value) o().base = ev.target.value; else delete o().base; dirty(); buildRight(); } },
@@ -989,8 +1313,10 @@ function buildRight() {
       const tw = pose.motion && pose.motion.twitch;
       const box = el("div", { class: "sub" });
       box.append(el("label", {}, el("input", { type: "checkbox", checked: !!tw, onchange: ev => {
-        if (ev.target.checked) o().motion = { twitch: { eye: "right", lid: F.upper.closed ? "closed" : (Object.keys(F.upper)[0] || "closed"), every: [2500, 6000], flutters: 3 } };
-        else delete o().motion;
+        const m = { ...(o().motion || {}) };
+        if (ev.target.checked) m.twitch = { eye: "right", lid: F.upper.closed ? "closed" : (Object.keys(F.upper)[0] || "closed"), every: [2500, 6000], flutters: 3 };
+        else delete m.twitch;
+        if (Object.keys(m).length) o().motion = m; else delete o().motion;
         dirty(); buildRight();
       } }), "Eye twitch while this pose holds"));
       if (tw) {
@@ -1001,6 +1327,68 @@ function buildRight() {
           pair("Pause (ms)", () => tw.every, v => edit(t => t.every = v)),
           num("Flicks", () => tw.flutters, v => edit(t => t.flutters = clamp(v, 1, 10))),
           el("div", { class: "muted tiny" }, "Shortest and longest pause between twitches. Each flick lasts 70 ms."));
+      }
+      return box;
+    })(),
+    (() => {
+      // a mouth otherwise only moves while talking: this is what lets a sleeping one breathe
+      const cycle = pose.motion && pose.motion.mouth_cycle;
+      const box = el("div", { class: "sub" });
+      const save = v => {
+        const m = { ...(o().motion || pose.motion || {}) };
+        if (v) m.mouth_cycle = v; else delete m.mouth_cycle;
+        if (Object.keys(m).length) o().motion = m; else delete o().motion;
+        pose.motion = o().motion;
+      };
+      box.append(el("label", {}, el("input", { type: "checkbox", checked: !!cycle, onchange: ev => { save(ev.target.checked ? 3000 : 0); dirty(); buildRight(); } }),
+        "Mouth keeps moving while this pose holds"));
+      if (cycle) box.append(num("Open and close (ms)", () => cycle, v => save(clamp(Math.round(v) || 300, 300, 20000)), 100));
+      return box;
+    })(),
+    (() => {
+      // an eye roll, over the top, once as the pose starts
+      const roll = pose.motion && pose.motion.roll;
+      const box = el("div", { class: "sub" });
+      const save = v => {
+        const m = { ...(o().motion || pose.motion || {}) };
+        if (v) m.roll = v; else delete m.roll;
+        if (Object.keys(m).length) o().motion = m; else delete o().motion;
+        pose.motion = o().motion;
+      };
+      box.append(el("div", { class: "row" }, el("label", {}, el("input", { type: "checkbox", checked: !!roll, onchange: ev => { save(ev.target.checked ? 1200 : 0); LIVE.rollT0 = performance.now(); dirty(); buildRight(); } }),
+        "Roll the eyes when this pose starts"),
+        ...(roll ? [el("button", { class: "small", onclick: () => { LIVE.rollT0 = performance.now(); } }, "again")] : [])));
+      if (roll) box.append(num("Whole roll (ms)", () => roll, v => save(clamp(Math.round(v) || 300, 300, 5000)), 100));
+      return box;
+    })(),
+    (() => {
+      // this pose's color on the rails; saved with the face
+      const L = pose.lights;
+      const box = el("div", { class: "sub" });
+      box.append(el("label", {}, el("input", { type: "checkbox", checked: !!L, onchange: ev => {
+        if (ev.target.checked) o().lights = { color: "#ff4fa0", brightness: 40 };
+        else delete o().lights;
+        dirty(); buildRight();
+      } }), "Rail lights while this pose holds"));
+      if (L) {
+        const edit = fn => { const m = o(); m.lights = { ...pose.lights }; fn(m.lights); pose.lights = m.lights; dirty(); };
+        const hex = el("input", { type: "text", style: "width:72px", value: L.color, onchange: ev => {
+          const v = ev.target.value.trim();
+          if (!/^#?[0-9a-fA-F]{6}$/.test(v)) { ev.target.value = pose.lights.color; return; }
+          const c = v.startsWith("#") ? v : "#" + v;
+          ev.target.value = c; pick.value = c.toLowerCase(); edit(l => l.color = c);
+        } });
+        const pick = el("input", { type: "color", value: L.color.toLowerCase(), oninput: ev => { hex.value = ev.target.value; edit(l => l.color = ev.target.value); } });
+        const bright = v => clamp(Math.round(v) || 0, 0, 100);
+        const slide = el("input", { type: "range", min: 0, max: 100, value: L.brightness ?? 40, oninput: ev => edit(l => l.brightness = bright(ev.target.value)) });
+        const pulsing = !!L.pulse;
+        box.append(el("label", {}, el("span", {}, "Color"), pick, hex), el("label", {}, el("span", {}, "Brightness"), slide),
+          el("label", {}, el("input", { type: "checkbox", checked: pulsing, onchange: ev => {
+            edit(l => { if (ev.target.checked) l.pulse = 2000; else delete l.pulse; });
+            buildRight();
+          } }), "Pulse"),
+          ...(pulsing ? [num("One breath (ms)", () => L.pulse, v => edit(l => l.pulse = clamp(Math.round(v) || 300, 300, 10000)), 100)] : []),
+          el("div", { class: "muted tiny" }, "Fades in on four LEDs a rail. The other two stay free for the mic, reply and camera lights. LEDs mix color differently from a screen, so Try this pose to judge it."));
       }
       return box;
     })()));
@@ -1020,7 +1408,6 @@ function buildRight() {
   R.append(robotPanel(pose));
   R.append(el("section", {}, el("h2", {}, "Checks"), el("div", { id: "checks" })));
   refreshChecks();
-  foldSections(R);
 }
 function syncSliders() { const m = $("#mouthW"); if (m) m.value = LIVE.mouthWeight; }
 
@@ -1039,6 +1426,12 @@ function refreshChecks() {
   if (F.lidMode === "swap" && !F.upper.closed) add("w", "swap lids but no upper lid called 'closed': a blink has nothing to show");
   for (const [k, fr] of Object.entries(F.shapes)) fr.forEach((v, i) => chk(v, `mouth ${k}[${i}]`));
   for (const [k, s] of Object.entries(F.decorators)) chk(s.image, `decorator ${k}`);
+  for (const [name, s] of Object.entries(DOC.touch || {})) {
+    const problem = spotProblem(s);
+    if (problem) add("w", `touch spot ${name}: ${problem}`);
+    if (!F.emotions[s.pose]) add("w", `touch spot ${name} shows "${s.pose}", which this face doesn't have`);
+    if (s.mirror && s.rect && Math.abs(s.rect[0] + s.rect[2] / 2 - SW / 2) < s.rect[2] / 2) add("w", `touch spot ${name} is mirrored but crosses the middle, so its two sides overlap`);
+  }
   for (const [n, q] of Object.entries(F.emotions)) {
     const tw = q.motion && q.motion.twitch;
     if (tw && !F.upper[tw.lid]) add("w", `${n}'s twitch wants upper lid "${tw.lid}", which isn't drawn: it won't twitch`);
@@ -1294,16 +1687,13 @@ $("#pxpImport").onclick = async () => {
         log(`eye white ${sd} ← ${L.name}`);
       } else if (L.role === "iris") {
         const [sx, sy, sw, sh] = sockRect(sd);
-        const [cx, w] = centredSpan(x0, x1, sx, sw), [cy, h] = centredSpan(y0, y1, sy, sh);
-        await upload(crop(data, cx, cy, w, h), name); put(e, "iris", sd, name);
+        // just what's drawn: the rig rests it in the middle of the eye white, wherever it was drawn,
+        // and works out how far it goes from the two drawings (Iris travel, unless set by hand)
+        const w = x1 - x0, h = y1 - y0;
+        await upload(crop(data, x0, y0, w, h), name); put(e, "iris", sd, name);
         const white = todo.find(o => o.role === "sclera" && o.side === sd);
         if (white && (x1 - x0 > white.bbox[2] - white.bbox[0] || y1 - y0 > white.bbox[3] - white.bbox[1])) irisBig = true;
-        if (white && !e.iris_travel) {
-          const ww = white.bbox[2] - white.bbox[0], wh = white.bbox[3] - white.bbox[1];
-          e.iris_travel = [Math.max(2, Math.round(ww * 0.2)), Math.max(1, Math.round(wh * 0.2))];
-          log(`iris travel set to [${e.iris_travel}] from the eye white (tune it by hand)`);
-        }
-        log(`iris ${sd} ← ${L.name}: ${w}x${h}`);
+        log(`iris ${sd} ← ${L.name}: ${w}x${h}, resting in the middle of the eye white`);
       } else if (L.role === "lower lid" || (L.role === "upper lid" && swap)) {
         // swap lids are cut to the whole socket: top- or bottom-aligned, either way exactly where drawn
         const [sx, sy, sw, sh] = sockRect(sd);
@@ -1383,7 +1773,7 @@ async function baseImageData() {
 }
 
 // ----------------------------------------------------------------- folders, save
-function buildAll() { buildLeft(); buildRight(); buildInspector(); foldSections($("#stage")); }
+function buildAll() { buildLeft(); buildRight(); buildInspector(); settle("stage"); }
 function buildInspector() {
   const box = $("#inspector"); if (!box) return;
   box.innerHTML = "";
@@ -1405,7 +1795,7 @@ async function openFace(dir) {
   DIR = dir; localStorage.studioFace = dir;
   const r = await api(`/api/face?dir=${encodeURIComponent(dir)}`);
   const fresh = !r.doc || !Object.keys(r.doc).length;
-  DOC = fresh ? starterDoc(dir.split("/").pop()) : r.doc; FILES = r.files; STAMP = Date.now();
+  DOC = fresh ? starterDoc(dir.split("/").pop()) : r.doc; FILES = r.files; STAMP = Date.now(); FILE_STAMP = r.stamp || "";
   const own = HOME.pxps.find(p => p.startsWith(dir + "/") && !p.slice(dir.length + 1).includes("/"));
   if (own) $("#pxpSel").value = own;
   for (const k in IMG) delete IMG[k]; for (const k in TOPROW) delete TOPROW[k];
@@ -1416,12 +1806,28 @@ async function openFace(dir) {
 }
 $("#faceSel").onchange = ev => { if (DIRTY && !confirm("Drop unsaved changes?")) { ev.target.value = DIR; return; } openFace(ev.target.value); };
 $("#reload").onclick = () => { if (!DIRTY || confirm("Drop unsaved changes?")) openFace(DIR); };
+// When the file was last read or written here, so a save can't quietly flatten someone else's edit.
+let FILE_STAMP = "";
 async function saveFace() {
-  if (!DOC || !DIR) return;
-  await api(`/api/save?dir=${encodeURIComponent(DIR)}`, { method: "POST", body: JSON.stringify(DOC) });
+  if (!DOC || !DIR) return false;
+  const send = force => fetch(`/api/save?dir=${encodeURIComponent(DIR)}&since=${FILE_STAMP}${force ? "&force=1" : ""}`, { method: "POST", body: JSON.stringify(DOC) });
+  let r;
+  try { r = await send(false); }
+  catch (err) { banner("Can't reach the studio server. Is the Face Studio window still open? Double-click Face Studio.cmd again."); throw err; }
+  if (r.status === 409 && (await r.clone().json()).changed) {
+    if (!confirm("face.yaml changed on disk since this page opened it, and this page doesn't have those changes.\n\nOK saves this page over it (the file on disk is kept as a face.yaml.bak).\nCancel keeps both as they are, so you can copy what you want and press Reload.")) {
+      log("Not saved: face.yaml changed on disk. Reload picks up the file, and drops what's unsaved on this page.");
+      return false;
+    }
+    r = await send(true);
+  }
+  if (!r.ok) { const e = await r.json().catch(() => ({})); banner(`The studio server said: ${e.error || r.status}`); throw new Error(e.error || r.status); }
+  banner("");
+  FILE_STAMP = (await r.json()).stamp || FILE_STAMP;
   HIST.now = JSON.stringify(DOC); HIST.saved = HIST.now;
   dirty(false); await refreshLists(); log("Saved face.yaml (the previous one is kept as face.yaml.bak-<time>).");
   const d = $("#dirty"); d.textContent = "saved"; setTimeout(() => { if (d.textContent === "saved") d.textContent = ""; }, 2000);
+  return true;
 }
 $("#save").onclick = saveFace;
 window.addEventListener("keydown", ev => {
@@ -1461,7 +1867,7 @@ $("#openFolder").onclick = openFolder; $("#welcomeOpen").onclick = openFolder;
 function setZoom(z) { ZOOM = z; screen.width = SW * z; screen.height = SH * z; $("#zoom").value = String(z); }
 // The biggest whole zoom that fits and leaves the controls under it in view. Whole only: it's pixel art.
 function fitZoom() {
-  return clamp(Math.floor(Math.min($("#stage").clientWidth / SW, (innerHeight - 230) / SH)), 1, 4);
+  return clamp(Math.floor(Math.min(($("#stage").clientWidth - 40) / SW, (innerHeight - 230) / SH)), 1, 4);   // 40: the rails
 }
 $("#zoom").onchange = ev => { setZoom(Number(ev.target.value)); localStorage.studioZoom = ev.target.value; };
 window.addEventListener("beforeunload", ev => { if (DIRTY) { ev.preventDefault(); ev.returnValue = ""; } });

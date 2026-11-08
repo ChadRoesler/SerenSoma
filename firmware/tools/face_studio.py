@@ -44,6 +44,7 @@ TOOLS = Path(__file__).resolve().parent
 ROOT = TOOLS.parent.parent          # the open folder; Open folder... or --root changes it
 SETTINGS = Path.home() / ".face_studio.json"
 PAGE = TOOLS / "face_studio.html"
+HEAD_TOP = TOOLS / "stackChanTop.png"
 sys.path.insert(0, str(TOOLS))
 import face as facetool  # noqa: E402  (face.py: DEFAULT_EMOTIONS, screen size, name limit)
 
@@ -422,6 +423,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/":
                 return self.send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+            if u.path == "/stackChanTop.png":
+                return self.send(200, HEAD_TOP.read_bytes(), "image/png")
             if u.path == "/api/home":
                 faces, pxps = [], []
                 for f in walk(ROOT):
@@ -443,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
                 y = next((d / n for n in ("face.yaml", "face.yml") if (d / n).exists()), None)
                 doc = (yaml.safe_load(y.read_text(encoding="utf-8")) or {}) if y else {}
                 files = sorted(p.name for p in d.iterdir() if p.suffix.lower() == ".png") if d.is_dir() else []
-                return self.send(200, {"doc": doc, "files": files})
+                return self.send(200, {"doc": doc, "files": files, "stamp": str(y.stat().st_mtime_ns) if y else ""})
             if u.path.startswith("/file/"):
                 return self.send(200, inside(u.path[len("/file/"):]).read_bytes(), "image/png")
             if u.path == "/api/pxp":
@@ -484,7 +487,12 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/bot/try":
                 b = json.loads(body)
                 try:
-                    bot_call("/api/emotion", json.dumps({"name": b["name"]}).encode(), {"Content-Type": "application/json"})
+                    # the color being worked on, not whatever the face on the robot has for this pose
+                    lit = facetool.lights_rgb(b.get("lights")) or [0, 0, 0]
+                    bot_call("/api/emotion", json.dumps({"name": b["name"], "lights": lit, "lightsPulse": facetool.lights_pulse(b.get("lights")),
+                                                         "look": facetool.sided_pair(b.get("look")), "brow": facetool.sided_pair(b.get("brow")),
+                                                         "mouthCycle": int(b.get("mouthCycle") or 0), "roll": int(b.get("roll") or 0)}).encode(),
+                             {"Content-Type": "application/json"})
                     tw = b.get("twitch")
                     bot_call("/api/twitch", json.dumps(tw or {"off": True}).encode(), {"Content-Type": "application/json"})
                 except (OSError, ValueError) as e:
@@ -505,6 +513,9 @@ class Handler(BaseHTTPRequestHandler):
                 y = d / "face.yaml"
                 if q.get("new") and y.exists():
                     return self.send(409, {"error": f"{q['dir']} already has a face. Pick another name."})
+                # something else wrote it after this page opened it, and this page doesn't have that
+                if q.get("since") and not q.get("force") and y.exists() and str(y.stat().st_mtime_ns) != q["since"]:
+                    return self.send(409, {"changed": True, "error": "face.yaml changed on disk since this page opened it"})
                 d.mkdir(parents=True, exist_ok=True)
                 doc = json.loads(body)
                 header = "# StackChan face -- see firmware/docs/custom-faces.md"
@@ -512,7 +523,7 @@ class Handler(BaseHTTPRequestHandler):
                     header = header_of(y.read_text(encoding="utf-8")) or header
                     shutil.copy2(y, d / f"face.yaml.bak-{time.strftime('%Y%m%d-%H%M%S')}")
                 y.write_text(emit_yaml(doc, header), encoding="utf-8")
-                return self.send(200, {"ok": True})
+                return self.send(200, {"ok": True, "stamp": str(y.stat().st_mtime_ns)})
             if u.path == "/api/file":
                 d = inside(q["dir"])
                 d.mkdir(parents=True, exist_ok=True)

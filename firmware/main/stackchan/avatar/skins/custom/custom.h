@@ -110,6 +110,12 @@ struct EmotionPose_t {
     int eyeOpen     = 100;  // lid position, 0~100
     int browOffsetY = 0;
     int browRotation = 0;  // tenths of a degree, mirrored on the right brow
+    int browOffsetYRight  = 0;  // the two above are the left brow; these are the right
+    int browRotationRight = 0;
+    uitk::Vector2i lookLeft{0, 0};   // where each eye looks in this pose, -100~100, added to the gaze
+    uitk::Vector2i lookRight{0, 0};
+    uint32_t mouthCycleMs = 0;       // the mouth opens and closes on its own this often; 0 leaves it still
+    uint32_t rollMs       = 0;       // the eyes roll once, over the top, when this pose starts
 
     // Face Studio's rig. Empty means "the same as the plain field above", so an
     // older face.json reads exactly as it always did.
@@ -121,6 +127,28 @@ struct EmotionPose_t {
     bool overlaySet = false;                   // true: overlay below replaces the face's
     std::string overlay;                       // "" with overlaySet = no hair over
     PoseTwitch_t twitch;
+    bool lightsOn = false;          // this pose has a color on the rails
+    uint8_t lights[3] = {0, 0, 0};  // already scaled to brightness by the compiler
+    uint32_t lightsPulseMs = 0;     // one breath, full to dim and back; 0 holds steady
+};
+
+/**
+ * @brief A rectangle of the screen that answers a tap with a pose: a nose to boop
+ */
+struct TouchSpot_t {
+    std::string name;
+    std::string pose;
+    int x = 0, y = 0, w = 0, h = 0;  // screen pixels, from the top left
+    uint32_t ms = 2000;              // how long the pose shows
+    std::string gesture = "tap";     // tap | drag (any way) | left | right | up | down
+};
+
+/**
+ * @brief What a kind of touch on top of the head shows, when the face says
+ */
+struct HeadTouch_t {
+    std::string pose;
+    uint32_t ms = 2000;
 };
 
 /**
@@ -159,6 +187,14 @@ struct FaceManifest_t {
     uitk::Vector2i rightEyePos{52, -18};
     uitk::Vector2i socketSize{56, 48};
     uitk::Vector2i irisTravel{12, 8};
+    // Where the iris rests: the compiler measures the drawn pixels so it sits in the middle of the
+    // eye white, whatever padding its PNG has. Per eye, as the art can differ.
+    uitk::Vector2i irisOffsetLeft{0, 0};
+    uitk::Vector2i irisOffsetRight{0, 0};
+    // How far the iris can go and stay inside the white. The socket only follows the gaze this far,
+    // so a long look rolls the iris and doesn't drag the drawn lids off the face. -1: no limit.
+    uitk::Vector2i irisRoom{-1, -1};
+    int glanceLagMs = 40;  // the other eye lands this long after the leading one; 0 moves them together
     int irisParallax = 25;  // percent of the gaze offset applied to the socket
     int clipRadius   = 0;   // >0 rounds the socket clip
 
@@ -184,6 +220,10 @@ struct FaceManifest_t {
     /* -------------------------------- Expression ------------------------------- */
     std::map<std::string, DecoratorSpec_t> decorators;
     std::map<std::string, EmotionPose_t> emotions;
+    std::vector<TouchSpot_t> touchSpots;
+    bool touchDeclared = false;  // the face says what its spots are, even if that's none
+    std::map<std::string, HeadTouch_t> headTouches;  // stroke_front_to_back, poke_middle, scritch...
+    bool headDeclared = false;   // true: these replace the stock response to a pet
 
     /** @brief Load and parse face.json from the assets partition */
     static FaceManifest_t load();
@@ -216,6 +256,13 @@ public:
     void setVisible(bool visible) override;
     void setSize(int size) override;
 
+    /** @brief Where this eye looks on top of the gaze, -100~100. Each eye has its own. */
+    void setLook(const uitk::Vector2i& look);
+    uitk::Vector2i irisNow() const
+    {
+        return _iris_now;
+    }
+
     /** @brief Select lid shapes by name. Unknown names leave the lid unchanged. */
     void applyLids(const std::string& upper, const std::string& lower);
 
@@ -234,6 +281,10 @@ private:
     bool _is_left_eye = false;
     uitk::Vector2i _anchor;
     uitk::Vector2i _iris_travel;
+    uitk::Vector2i _look{0, 0};
+    uitk::Vector2i _iris_now{0, 0};
+    uitk::Vector2i _iris_offset{0, 0};
+    uitk::Vector2i _iris_room{-1, -1};
     int _parallax = 25;
 
     lv_image_dsc_t _sclera_dsc{};
@@ -315,6 +366,14 @@ public:
     /** @param shape a drawn brow shape; "" or unknown keeps the current image */
     void applyPose(int offsetY, int rotation, const std::string& shape = "");
     void setVisible(bool visible);
+    int nowY() const
+    {
+        return _now_y;
+    }
+    int nowRotation() const
+    {
+        return _now_rotation;
+    }
     bool isValid() const
     {
         return _image != nullptr;
@@ -322,6 +381,8 @@ public:
 
 private:
     bool _is_left_brow = false;
+    int _now_y         = 0;
+    int _now_rotation  = 0;
     uitk::Vector2i _anchor;
     lv_image_dsc_t _dsc{};
     SpriteMap _shapes;
@@ -390,11 +451,56 @@ public:
     /** @brief Event decorators (petting, shaking) drawn from this face. */
     int addNamedDecorator(const std::string& name, uint32_t lifetimeMs = 0) override;
 
+    /** @brief The spot a touch began in that answers this gesture, the first declared winning; -1 for none. */
+    int spotAt(int x, int y, const char* gesture) const;
+    const std::map<std::string, HeadTouch_t>& headTouches() const
+    {
+        return _manifest.headTouches;
+    }
+    int glanceLagMs() const
+    {
+        return _manifest.glanceLagMs;
+    }
+    bool headDeclared() const
+    {
+        return _manifest.headDeclared;
+    }
+    const std::vector<TouchSpot_t>& touchSpots() const
+    {
+        return _manifest.touchSpots;
+    }
+    bool touchDeclared() const
+    {
+        return _manifest.touchDeclared;
+    }
+
     /** @brief Show a pose for a moment, then go back to what was showing. Unknown names do nothing. */
     void react(const std::string& emotion, uint32_t ms);
 
     /** @brief Replace the current pose's twitch, until the next emotion. For trying one out. */
     void setTwitch(const PoseTwitch_t& twitch);
+    /** @brief Fade the mood LEDs (2-5 and 8-11) to a color. 0, 1, 6 and 7 stay for the mic, reply and camera lights. */
+    void showLights(uint8_t r, uint8_t g, uint8_t b, uint32_t pulseMs = 0);
+    /** @brief Look, brows and mouth motion for the pose showing now, until the next emotion. For trying them out. */
+    void tryRig(const uitk::Vector2i& lookLeft, const uitk::Vector2i& lookRight, const uitk::Vector2i& browLeft,
+                const uitk::Vector2i& browRight, uint32_t mouthCycleMs, uint32_t rollMs = 0);
+    /** @brief The pose to go back to in place of "neutral". The voice code asks for neutral on
+     *  every connect, listen and hang up, which would wake a sleeping face. Empty for none. */
+    void setResting(const std::string& pose)
+    {
+        _resting = pose;
+    }
+    const std::string& resting() const
+    {
+        return _resting;
+    }
+    /** @brief While talking the speech moves the mouth, and a pose's own mouth motion waits. */
+    void setTalking(bool talking)
+    {
+        _talking = talking;
+    }
+    /** @brief "irisL x,y irisR x,y browL y,tilt browR y,tilt mouth weight", so a test can read what's applied. */
+    void rigState(char* out, size_t size);
     /** @brief Runs the pose's own motion. Driven by PoseMotionModifier. */
     void tickMotion(uint32_t nowMs);
     uint32_t twitchCount() const
@@ -429,6 +535,30 @@ private:
     bool _twitch_shown     = false;
     uint32_t _twitch_count = 0;
     void showTwitchLid(bool shown);
+
+    uint8_t _light_from[3]     = {0, 0, 0};
+    uint8_t _light_now[3]      = {0, 0, 0};
+    uint8_t _light_to[3]       = {0, 0, 0};
+    uint8_t _light_written[3]  = {0, 0, 0};
+    uint32_t _light_pulse_ms   = 0;
+    uint32_t _light_start      = 0;
+    uint32_t _light_last_write = 0;
+    bool _light_fading         = false;
+    bool _light_lit            = false;  // a face with no colors never touches the rails
+    void tickLights(uint32_t nowMs);
+
+    std::string _resting;
+    bool _talking               = false;
+    uitk::Vector2i _base_look_left{0, 0};   // the pose's (or a try's) look, which a roll adds to
+    uitk::Vector2i _base_look_right{0, 0};
+    uint32_t _roll_ms    = 0;
+    uint32_t _roll_start = 0;
+    void tickRoll(uint32_t nowMs);
+    void applyLooks(const uitk::Vector2i& add);
+    uint32_t _mouth_cycle_ms    = 0;
+    uint32_t _mouth_cycle_start = 0;
+    int _mouth_cycle_weight     = -1;
+    void tickMouth(uint32_t nowMs);
 
     uitk::Vector2i anchorFor(const std::string& anchor) const;
     void applyDecorators(const std::vector<std::string>& names);

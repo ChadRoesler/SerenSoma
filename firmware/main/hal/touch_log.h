@@ -17,6 +17,7 @@ namespace touch_log {
 // Taps on the screen share the feed: the head gestures use 0 to 4.
 constexpr int kBoopNose     = 10;
 constexpr int kKissForehead = 11;
+constexpr int kSpotFirst    = 100;  // a face's touch spots: this plus the spot's place in its list
 
 /** @brief One sensor read: the strength in each of the 3 zones, and the gesture it completed. */
 void add(uint32_t ms, const uint8_t zones[3], int gesture);

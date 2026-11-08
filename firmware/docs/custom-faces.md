@@ -319,6 +319,44 @@ exists, so a partial face still renders. The build prints what it substituted.
 
 ---
 
+### Touch spots
+
+Rectangles of the screen that answer a tap with a pose, then go back. Draw them in
+Face Studio's **Touch spots** panel, or write them by hand, in screen pixels from
+the top left:
+
+```yaml
+touch:
+  boop: {rect: [135, 105, 70, 50], pose: surprised, ms: 1500}
+  forehead kiss: {rect: [105, 30, 110, 42], pose: loving, ms: 3000}
+```
+
+Anywhere else is still tap to talk. The first in the list wins where they overlap.
+The studio warns about anything under 40 px a side, narrower than a fingertip.
+
+A spot can fire on something other than a tap: `gesture:` is `tap`, `drag` (any way),
+`left`, `right`, `up` or `down`, measured from where the finger came down, which has
+to be inside the rectangle. `mirror: true` adds the same spot on the other side, with
+left and right swapped.
+
+### Head touches
+
+What a touch on top of the head shows. Once a face has this block, only these answer,
+and the stock happy face for a pet goes away. Pressure can't be read: a light brush
+looks the same as a firm one.
+
+```yaml
+head:
+  stroke_front_to_back: {pose: loving, ms: 3000}
+  stroke_back_to_front: {pose: confused}
+  poke_front: {pose: surprised}
+  poke_middle: {pose: confused}
+  poke_back: {pose: annoyed}
+  finger_rest: {pose: thinking}
+  hand: {pose: relaxed}
+  scritch: {pose: laughing}
+```
+
 ### Motion per pose
 
 A pose can carry motion of its own, which runs while it holds:
@@ -332,6 +370,61 @@ emotions:
 flicks to that drawing and back `flutters` times, 70 ms a flick, then pauses for a
 random time between the two `every` values, in milliseconds. A lid that isn't
 drawn means no twitch, with a warning at build time.
+
+A pose can keep its mouth moving on its own, so a two-frame sleeping mouth breathes:
+
+```yaml
+emotions:
+  sleepy: {motion: {mouth_cycle: 3000}}
+```
+
+A pose can also roll its eyes, once, as it starts: `motion: {roll: 1200}` is the
+milliseconds for the whole roll, 300 to 5000.
+
+The iris rests in the middle of the eye white, measured from the drawn pixels, so
+empty space in its PNG doesn't move it. Unless `iris_travel` is set by hand, a full
+look takes the middle of the iris half an iris past the white's edge: rolled clean
+off. In an idle glance Wren's right eye (screen left) leads and the other lands
+`glance_lag_ms` later, under `parts: eyes:`: 40 unless set, 0 to 300, 0 for together.
+The socket only follows a look as far as the iris stays inside the white, so
+drawn lids stay put. Sprite eyes don't move with breathing; the mouth does.
+
+`mouth_cycle` is the milliseconds to open and close once, 300 to 20000. Otherwise a
+mouth only moves while talking. While talking the speech has the mouth, and this
+waits, then picks back up when the speech is done.
+
+### Where the eyes look, and brows per side
+
+```yaml
+emotions:
+  thinking: {look: [40, -50]}                              # both eyes, up and to the right
+  focused: {look: {left: [40, 0], right: [-40, 0]}}        # each its own: cross-eyed
+  fancy: {brow: {left: [-6, 0], right: [2, 30]}}           # one brow up
+```
+
+`look` is x, y from -100 to 100 and adds to wherever the gaze already is. `brow` is
+y, tilt as always, and takes the same `left` and `right` form. Sides are screen sides.
+
+### Rail lights per pose
+
+A pose can also light the rails while it holds:
+
+```yaml
+emotions:
+  loving: {lights: {color: "#ff4fa0", brightness: 40}}
+  annoyed: {lights: {color: "#ff7a00", brightness: 40}}
+  dizzy: {lights: {color: "#30ff60", brightness: 60, pulse: 1500}}
+```
+
+`pulse` is how long one breath takes in milliseconds, 300 to 10000, full to 15% and
+back. Leave it out to hold steady. The LEDs take 5 bits of red and blue and 6 of
+green, so a dim pulse has few steps to work with; higher brightness breathes smoother.
+
+`brightness` is 0 to 100 and defaults to 40. The color fades in over 300 ms on LEDs
+2-5 and 8-11, and a pose with no `lights` fades them out. LEDs 0, 1, 6 and 7 stay
+free for the green, blue and red status lights, which sit above everything else on
+the rails. A face with no `lights` at all never touches them. LEDs mix color
+differently from a screen, so judge it on the robot with **Try this pose**.
 
 ## Emotions
 

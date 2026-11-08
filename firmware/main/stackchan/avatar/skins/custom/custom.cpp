@@ -5,6 +5,9 @@
  */
 #include "custom.h"
 #include "../../../utils/random.h"
+#include <cmath>
+#include <cstring>
+#include <hal/hal.h>
 #include <assets/assets.h>
 #include <mooncake_log.h>
 #include <esp_heap_caps.h>
@@ -105,6 +108,8 @@ void SpriteBrow::applyPose(int offsetY, int rotation, const std::string& shape)
 
     // Mirror the tilt on the right brow so one authored pose reads symmetrically.
     const int applied = _is_left_brow ? rotation : -rotation;
+    _now_y            = offsetY;
+    _now_rotation     = rotation;
 
     _image->setPos(_anchor.x, _anchor.y + offsetY);
     _image->setRotation(normalize_rotation(applied));
@@ -378,12 +383,191 @@ bool CustomAvatar::setEmotionByName(const std::string& emotion)
         _left_brow->applyPose(pose->browOffsetY, pose->browRotation, pose->browShapeLeft);
     }
     if (_right_brow) {
-        _right_brow->applyPose(pose->browOffsetY, pose->browRotation, pose->browShapeRight);
+        _right_brow->applyPose(pose->browOffsetYRight, pose->browRotationRight, pose->browShapeRight);
     }
 
     applyBackdrop(*pose);
     applyDecorators(pose->decorators);
+    if (_mouth_cycle_ms > 0 && pose->mouthCycleMs == 0 && _key_elements.mouth) {
+        _key_elements.mouth->setWeight(0);  // back to closed, not wherever it had got to
+    }
+    _mouth_cycle_ms     = pose->mouthCycleMs;
+    _mouth_cycle_start  = GetHAL().millis();
+    _mouth_cycle_weight = -1;
+
+    _base_look_left  = pose->lookLeft;
+    _base_look_right = pose->lookRight;
+    _roll_ms         = pose->rollMs;
+    _roll_start      = GetHAL().millis();
+    applyLooks({0, 0});
+
+    if (pose->lightsOn) {
+        const uint32_t was = _light_start;
+        showLights(pose->lights[0], pose->lights[1], pose->lights[2], pose->lightsPulseMs);
+        // a pulse counts from the pose starting, like the mouth does, so the two that are set to
+        // the same time stay in step even when the pose comes back with the same color
+        if (pose->lightsPulseMs > 0) {
+            if (_light_start == was) {
+                // same color as before: no fade to play, only the breath to restart
+                for (int i = 0; i < 3; i++) {
+                    _light_from[i] = _light_to[i];
+                }
+            }
+            _light_start  = _mouth_cycle_start;
+            _light_fading = true;
+        }
+    } else if (_light_lit) {
+        showLights(0, 0, 0);
+    }
     return true;
+}
+
+void CustomAvatar::applyLooks(const Vector2i& add)
+{
+    if (_key_elements.leftEye) {
+        static_cast<EyeRig*>(_key_elements.leftEye.get())->setLook({_base_look_left.x + add.x, _base_look_left.y + add.y});
+    }
+    if (_key_elements.rightEye) {
+        static_cast<EyeRig*>(_key_elements.rightEye.get())->setLook({_base_look_right.x + add.x, _base_look_right.y + add.y});
+    }
+}
+
+void CustomAvatar::tickRoll(uint32_t nowMs)
+{
+    if (_roll_ms == 0) {
+        return;
+    }
+    const uint32_t t = nowMs - _roll_start;
+    if (t >= _roll_ms) {
+        _roll_ms = 0;
+        applyLooks({0, 0});
+        return;
+    }
+    // over the top, from one side to the other: in from the middle, round, and back
+    const float s = static_cast<float>(t) / static_cast<float>(_roll_ms);
+    const float r = 90.0f * std::min(1.0f, std::min(4.0f * s, 4.0f * (1.0f - s)));
+    const float a = (160.0f - 140.0f * s) * static_cast<float>(M_PI) / 180.0f;
+    applyLooks({static_cast<int>(r * std::cos(a)), static_cast<int>(-r * std::sin(a))});
+}
+
+void CustomAvatar::tryRig(const Vector2i& lookLeft, const Vector2i& lookRight, const Vector2i& browLeft, const Vector2i& browRight,
+                          uint32_t mouthCycleMs, uint32_t rollMs)
+{
+    _base_look_left  = lookLeft;
+    _base_look_right = lookRight;
+    _roll_ms         = rollMs;
+    _roll_start      = GetHAL().millis();
+    applyLooks({0, 0});
+    if (_left_brow) {
+        _left_brow->applyPose(browLeft.x, browLeft.y);
+    }
+    if (_right_brow) {
+        _right_brow->applyPose(browRight.x, browRight.y);
+    }
+    if (_mouth_cycle_ms > 0 && mouthCycleMs == 0 && _key_elements.mouth) {
+        _key_elements.mouth->setWeight(0);
+    }
+    _mouth_cycle_ms     = mouthCycleMs;
+    _mouth_cycle_start  = GetHAL().millis();
+    _mouth_cycle_weight = -1;
+}
+
+void CustomAvatar::rigState(char* out, size_t size)
+{
+    Vector2i left{0, 0}, right{0, 0};
+    if (_key_elements.leftEye) {
+        left = static_cast<EyeRig*>(_key_elements.leftEye.get())->irisNow();
+    }
+    if (_key_elements.rightEye) {
+        right = static_cast<EyeRig*>(_key_elements.rightEye.get())->irisNow();
+    }
+    snprintf(out, size, "%d,%d %d,%d %d,%d %d,%d %d", left.x, left.y, right.x, right.y, _left_brow ? _left_brow->nowY() : 0,
+             _left_brow ? _left_brow->nowRotation() : 0, _right_brow ? _right_brow->nowY() : 0,
+             _right_brow ? _right_brow->nowRotation() : 0, _mouth_cycle_weight);
+}
+
+void CustomAvatar::tickMouth(uint32_t nowMs)
+{
+    if (_mouth_cycle_ms == 0 || !_key_elements.mouth) {
+        return;
+    }
+    if (_talking) {
+        _mouth_cycle_weight = -1;  // ask again the moment the speech is done
+        return;
+    }
+    const float phase = static_cast<float>((nowMs - _mouth_cycle_start) % _mouth_cycle_ms) / static_cast<float>(_mouth_cycle_ms);
+    // in tens: most of these land on the same drawing, so don't ask for it again
+    const int weight = static_cast<int>(5.0f - 5.0f * std::cos(2.0f * static_cast<float>(M_PI) * phase) + 0.5f) * 10;
+    if (weight != _mouth_cycle_weight) {
+        _mouth_cycle_weight = weight;
+        _key_elements.mouth->setWeight(weight);
+    }
+}
+
+void CustomAvatar::showLights(uint8_t r, uint8_t g, uint8_t b, uint32_t pulseMs)
+{
+    _light_lit = r || g || b;
+    if (_light_to[0] == r && _light_to[1] == g && _light_to[2] == b && _light_pulse_ms == pulseMs) {
+        return;
+    }
+    _light_pulse_ms = pulseMs;
+    for (int i = 0; i < 3; i++) {
+        _light_from[i] = _light_now[i];
+    }
+    _light_to[0]  = r;
+    _light_to[1]  = g;
+    _light_to[2]  = b;
+    _light_start  = GetHAL().millis();
+    _light_fading = true;
+}
+
+void CustomAvatar::tickLights(uint32_t nowMs)
+{
+    constexpr uint32_t kFadeMs = 300;
+    if (!_light_fading || nowMs - _light_last_write < 20) {
+        return;
+    }
+    _light_last_write     = nowMs;
+    const uint32_t elapsed = nowMs - _light_start;
+    const uint32_t t       = std::min(elapsed, kFadeMs);
+    float level            = 1.0f;
+    if (_light_pulse_ms > 0) {
+        // starts at full, down to 15% and back, so a pose arrives at the color it asked for
+        const float phase = static_cast<float>(elapsed % _light_pulse_ms) / static_cast<float>(_light_pulse_ms);
+        level             = 0.15f + 0.85f * (0.5f + 0.5f * std::cos(2.0f * static_cast<float>(M_PI) * phase));
+    }
+    for (int i = 0; i < 3; i++) {
+        const int base = _light_from[i] + (static_cast<int>(_light_to[i]) - _light_from[i]) * static_cast<int>(t) / static_cast<int>(kFadeMs);
+        _light_now[i]  = static_cast<uint8_t>(base * level);
+    }
+    _light_fading = t < kFadeMs || _light_pulse_ms > 0;
+    // The LEDs take 5 bits of red and blue, 6 of green. Nothing to send if that hasn't moved,
+    // which is most ticks of a slow pulse. The last step of a fade lands exactly either way.
+    const bool sameOnLeds = ((_light_now[0] ^ _light_written[0]) & 0xF8) == 0 && ((_light_now[1] ^ _light_written[1]) & 0xFC) == 0 &&
+                            ((_light_now[2] ^ _light_written[2]) & 0xF8) == 0;
+    if (sameOnLeds && _light_fading) {
+        return;
+    }
+    for (uint8_t led : {2, 3, 4, 5, 8, 9, 10, 11}) {
+        GetHAL().setRgbColor(led, _light_now[0], _light_now[1], _light_now[2]);
+    }
+    GetHAL().refreshRgb();
+    for (int i = 0; i < 3; i++) {
+        _light_written[i] = _light_now[i];
+    }
+}
+
+int CustomAvatar::spotAt(int x, int y, const char* gesture) const
+{
+    const bool tap = std::strcmp(gesture, "tap") == 0;
+    for (size_t i = 0; i < _manifest.touchSpots.size(); i++) {
+        const auto& s = _manifest.touchSpots[i];
+        const bool answers = s.gesture == gesture || (s.gesture == "drag" && !tap);
+        if (answers && x >= s.x && x < s.x + s.w && y >= s.y && y < s.y + s.h) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 void CustomAvatar::react(const std::string& emotion, uint32_t ms)
@@ -446,6 +630,9 @@ void CustomAvatar::setTwitch(const PoseTwitch_t& twitch)
 
 void CustomAvatar::tickMotion(uint32_t nowMs)
 {
+    tickLights(nowMs);
+    tickMouth(nowMs);
+    tickRoll(nowMs);
     constexpr uint32_t kFlickMs = 70;
     if (!_twitch.on || static_cast<int32_t>(nowMs - _twitch_next) < 0) {
         return;

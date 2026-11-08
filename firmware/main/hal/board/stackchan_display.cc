@@ -258,26 +258,58 @@ void StackChanAvatarDisplay::SetupUI()
             ESP_LOGW(TAG, "Avatar panel is null, tap-to-talk disabled");
             return;
         }
+        // Where the finger came down: a touch belongs to the spot it began in.
+        static lv_point_t pressed_at{};
+        lv_obj_add_event_cb(
+            panel->get(),
+            [](lv_event_t*) {
+                if (lv_indev_t* indev = lv_indev_active()) {
+                    lv_indev_get_point(indev, &pressed_at);
+                }
+            },
+            LV_EVENT_PRESSED, nullptr);
+
         panel->onClick().connect([]() {
-            // Spots on the face that react rather than talk. Measured from Chad's art for now;
-            // /api/log has every tap's position. To become part of face.yaml, since faces differ.
-            lv_point_t at{};
+            // Spots on the face that react rather than talk, which the face declares (face.yaml: touch).
+            // /api/log has every touch, for placing them.
+            lv_point_t lifted{};
             if (lv_indev_t* indev = lv_indev_active()) {
-                lv_indev_get_point(indev, &at);
+                lv_indev_get_point(indev, &lifted);
             }
-            ESP_LOGI(TAG, "tap at %d,%d", (int)at.x, (int)at.y);
+            const lv_point_t at = pressed_at;
+            const int dx        = lifted.x - at.x;
+            const int dy        = lifted.y - at.y;
+            constexpr int kDragPixels = 18;   // less than this is a finger settling, not a drag
+            const char* gesture = "tap";
+            if (std::abs(dx) >= kDragPixels || std::abs(dy) >= kDragPixels) {
+                gesture = std::abs(dx) >= std::abs(dy) ? (dx < 0 ? "left" : "right") : (dy < 0 ? "up" : "down");
+            }
+            const bool tap = std::strcmp(gesture, "tap") == 0;
+            ESP_LOGI(TAG, "%s at %d,%d", gesture, (int)at.x, (int)at.y);
             if (auto* custom = dynamic_cast<CustomAvatar*>(&GetStackChan().avatar())) {
                 const uint8_t none[3] = {0, 0, 0};
-                if (at.x >= 135 && at.x <= 205 && at.y >= 105 && at.y <= 155) {
+                const int spot        = custom->spotAt(at.x, at.y, gesture);
+                if (spot >= 0) {
+                    custom->react(custom->touchSpots()[spot].pose, custom->touchSpots()[spot].ms);
+                    touch_log::add(GetHAL().millis(), none, touch_log::kSpotFirst + spot);
+                    return;
+                }
+                // a face from before touch spots: the two Chad's had, until it declares its own
+                if (custom->touchDeclared() || !tap) {
+                } else if (at.x >= 135 && at.x <= 205 && at.y >= 105 && at.y <= 155) {
                     custom->react("surprised", 1500);
                     touch_log::add(GetHAL().millis(), none, touch_log::kBoopNose);
                     return;
-                }
-                if (at.x >= 105 && at.x <= 215 && at.y >= 30 && at.y <= 72) {
+                } else if (at.x >= 105 && at.x <= 215 && at.y >= 30 && at.y <= 72) {
                     custom->react("loving", 3000);
                     touch_log::add(GetHAL().millis(), none, touch_log::kKissForehead);
                     return;
                 }
+            }
+
+            // a drag that isn't for a spot is nothing: only a tap talks
+            if (!tap) {
+                return;
             }
 
             static uint32_t last_toggle_tick = 0;
@@ -347,10 +379,16 @@ void StackChanAvatarDisplay::LvglUnlock()
 }
 
 // The status light, shown on both sides: LEDs 0-5 are one strip and 6-11 the other.
+// Held, so a mood or a light show can't hide whether the mic is open. Black lets go.
 static void set_status_light(uint8_t r, uint8_t g, uint8_t b)
 {
-    GetHAL().setRgbColor(0, r, g, b);
-    GetHAL().setRgbColor(6, r, g, b);
+    for (uint8_t led : {0, 6}) {
+        if (r || g || b) {
+            GetHAL().holdRgb(led, r, g, b);
+        } else {
+            GetHAL().releaseRgb(led);
+        }
+    }
     GetHAL().refreshRgb();
 }
 
@@ -425,6 +463,12 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
     DisplayLockGuard lock(this);
 
     auto& avatar = stackchan.avatar();
+
+    if (strcmp(emotion, "neutral") == 0) {
+        if (auto* custom = dynamic_cast<CustomAvatar*>(&avatar); custom && !custom->resting().empty()) {
+            emotion = custom->resting().c_str();
+        }
+    }
 
     // A sprite face describes each emotion in its manifest, so give it the raw
     // protocol string and let it pick lids, mouth shape, brows and decorator.
@@ -590,6 +634,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     } else if (!listening && mic_decorator_id >= 0) {
         avatar.removeDecorator(mic_decorator_id);
         mic_decorator_id = -1;
+    }
+
+    if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&avatar)) {
+        custom->setTalking(strcmp(status, Lang::Strings::SPEAKING) == 0);
     }
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {

@@ -86,6 +86,22 @@ def test_a_boop_mid_stroke_doesnt_split_it():
     assert [e["kind"] for e in events] == ["nose_boop", "stroke"]
 
 
+def test_the_face_decides_when_it_says():
+    head = {"stroke_front_to_back": {"pose": "loving", "ms": 3000}, "poke_back": {"pose": "angry"}}
+    assert tr.reaction_for({"kind": "stroke", "way": "front_to_back"}, head) == ("loving", 3000)
+    assert tr.reaction_for({"kind": "stroke", "way": "back_to_front"}, head) is None
+    assert tr.reaction_for({"kind": "poke", "where": "back"}, head) == ("angry", 2000)
+    assert tr.reaction_for({"kind": "scritch"}, head) is None      # it said things, and this wasn't one
+    assert tr.reaction_for({"kind": "scritch"}, {}) is None        # it said nothing happens
+    assert tr.reaction_for({"kind": "scritch"})[0] == "laughing"   # it never said
+
+
+def test_touch_spots():
+    events, _ = tr.TouchReader().feed([(1000, 0, 0, 0, 102)])
+    assert events[0]["kind"] == "touch_spot" and events[0]["index"] == 2
+    assert tr.reaction_for(events[0]) is None    # the firmware already showed the face's own pose
+
+
 def test_reactions():
     assert tr.reaction_for({"kind": "scritch"})[0] == "laughing"
     assert tr.reaction_for({"kind": "poke", "where": "middle"})[0] == "confused"
@@ -99,6 +115,82 @@ def test_reboot_forgets():
     reader.reset()
     e, s = reader.feed([], now_ms=99999)
     assert e == [] and s == []
+
+
+def test_a_long_moving_touch_is_a_scratch():
+    # 4.6 s, travelling front to back and churning: read as a stroke on 7 Nov, and it's a scratch
+    e = one(" ".join(["003", "033", "330", "300", "030", "303"] * 15) + " 300")
+    assert e["kind"] == "scritch", e
+
+
+def test_scritching_is_a_burst():
+    # Chad's scritches on 7 Nov: quick strokes, pokes and blips, all inside two seconds
+    burst = [{"kind": "stroke", "way": "back_to_front", "ms": 281, "t_ms": 1000},
+             {"kind": "poke", "where": "middle", "ms": 171, "t_ms": 1400},
+             {"kind": "stroke", "way": "back_to_front", "ms": 230, "t_ms": 1800},
+             {"kind": "scritch", "ms": 100, "t_ms": 2300}]
+    assert tr.scritching(burst)
+    # his real pet: 450 ms strokes, one every 1.7 s
+    pets = [{"kind": "stroke", "way": "front_to_back", "ms": 450, "t_ms": 1000 + i * 1700} for i in range(4)]
+    assert not tr.scritching(pets)
+    # a few pokes in a row are pokes
+    pokes = [{"kind": "poke", "where": "back", "ms": 300, "t_ms": 1000 + i * 500} for i in range(4)]
+    assert not tr.scritching(pokes)
+    # slow strokes the other way are strokes
+    slow = [{"kind": "stroke", "way": "back_to_front", "ms": 800, "t_ms": 1000 + i * 900} for i in range(3)]
+    assert not tr.scritching(slow)
+
+
+def test_overwhelm_is_earned():
+    o = tr.Overwhelm()
+    # quick scratches, one a second for 20 s: it tips over once, at 15
+    fired = [t for t in range(21) if o.touch(t * 1000, t * 1000 + 200, True)]
+    assert fired == [15], fired
+    # straight back to it: resting, nothing
+    assert not any(o.touch(t * 1000, t * 1000 + 200, True) for t in range(21, 60))
+    # a pause longer than the gap starts the count again
+    o = tr.Overwhelm()
+    assert not any(o.touch(t * 1000, t * 1000 + 200, True) for t in list(range(0, 10)) + list(range(14, 26)))
+    # one long unbroken scratch, still going: carries the run to 15 s
+    o = tr.Overwhelm()
+    assert not o.touch(0, 2000, True)
+    assert not o.touch(2500, 9000, True, still_going=True)
+    assert o.touch(2500, 15500, True, still_going=True)
+    # a hand still on the head can't start a run by itself
+    o = tr.Overwhelm()
+    assert not o.touch(0, 30000, True, still_going=True) and not o.running
+    # scratch, then pet: the pet ends it
+    o = tr.Overwhelm()
+    assert not o.touch(0, 8000, True)
+    assert not o.touch(9000, 9700, False) and not o.running
+    # Chad's second run on 7 Nov, on the sensor's clock: unbroken from 400755 to 419723, 19 s
+    run = [(400755, 50, "scritch"), (402120, 110, "scritch"), (404837, 410, "scritch"), (405296, 4627, "scritch"),
+           (409930, 4705, "scritch"), (415655, 651, "poke"), (416655, 400, "poke"), (417056, 1969, "scritch")]
+    o = tr.Overwhelm()
+    fired = [s for s, ms, k in run if o.touch(s, s + ms, tr.scritchy({"kind": k, "ms": ms}) or k == "poke")]
+    assert fired, "19 s of scratching gets there at 15"
+    import time
+    assert tr.work_hours(time.strptime("2026-11-06 10:00", "%Y-%m-%d %H:%M"))       # a Friday morning
+    assert not tr.work_hours(time.strptime("2026-11-06 19:00", "%Y-%m-%d %H:%M"))   # Friday night
+    assert not tr.work_hours(time.strptime("2026-11-07 10:00", "%Y-%m-%d %H:%M"))   # Saturday
+
+
+def test_night_window_crosses_midnight():
+    import time
+    at = lambda hhmm: time.strptime(f"2026-11-07 {hhmm}", "%Y-%m-%d %H:%M")
+    assert tr.in_window(at("23:30"), "22:30", "07:00")
+    assert tr.in_window(at("03:00"), "22:30", "07:00")
+    assert not tr.in_window(at("07:00"), "22:30", "07:00")
+    assert not tr.in_window(at("12:00"), "22:30", "07:00")
+    assert tr.in_window(at("13:00"), "12:00", "14:00") and not tr.in_window(at("14:00"), "12:00", "14:00")
+
+
+def test_overwhelm_takes_its_settings():
+    o = tr.Overwhelm(after_ms=5000)
+    assert [t for t in range(4) if o.touch(t * 1000, t * 1000 + 200, True)] == []
+    assert 0.6 < o.progress() < 0.7          # 3.2 s of 5
+    assert o.touch(5000, 5200, True)
+    assert o.progress() == 0.0               # it fired: the run starts over
 
 
 if __name__ == "__main__":

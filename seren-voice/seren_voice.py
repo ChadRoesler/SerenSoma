@@ -25,7 +25,7 @@ import av
 import numpy as np
 from aiohttp import ClientSession, ClientTimeout, FormData, WSMsgType, web
 
-from touch_read import TouchReader, reaction_for
+from touch_read import HEAD_KINDS, Overwhelm, TouchReader, in_window, reaction_for, scritching, scritchy, work_hours
 
 log = logging.getLogger("seren-voice")
 HERE = Path(__file__).resolve().parent
@@ -33,6 +33,56 @@ STATE = HERE / "state"
 HEARD_DIR = STATE / "heard"
 HEARD_LOG = STATE / "heard.jsonl"
 TOUCH_LOG = STATE / "touch.jsonl"
+CLIPS = STATE / "clips"     # saved sounds, played as they are: ahegao.wav is the one overwhelm plays
+SETTINGS = STATE / "settings.json"
+# What the console changes. Night is off until it's turned on; the rest are what tonight settled on.
+DEFAULT_SETTINGS = {
+    "night": {"enabled": False, "start": "22:30", "end": "07:00", "dimmer": 15, "volume": 30, "brightness": 20},
+    "work_hours": {"days": [0, 1, 2, 3, 4], "start": 8, "end": 17},
+    "overwhelm": {"enabled": True, "seconds": 15, "gap_seconds": 3, "rest_seconds": 120},
+}
+
+
+def load_settings():
+    s = json.loads(json.dumps(DEFAULT_SETTINGS))
+    try:
+        saved = json.loads(SETTINGS.read_text(encoding="utf-8"))
+        for k, v in saved.items():
+            if isinstance(v, dict) and isinstance(s.get(k), dict):
+                s[k].update(v)
+    except (OSError, ValueError):
+        pass
+    return s
+
+
+def merge_settings(current, change):
+    """Only known keys, with sane values. Raises ValueError with what was wrong."""
+    out = json.loads(json.dumps(current))
+    for section, values in (change or {}).items():
+        if section not in DEFAULT_SETTINGS or not isinstance(values, dict):
+            raise ValueError(f"no setting called {section}")
+        for k, v in values.items():
+            if k not in DEFAULT_SETTINGS[section]:
+                raise ValueError(f"no setting called {section}.{k}")
+            want = DEFAULT_SETTINGS[section][k]
+            if isinstance(want, bool):
+                if not isinstance(v, bool):
+                    raise ValueError(f"{section}.{k} is true or false")
+            elif isinstance(want, int):
+                if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                    raise ValueError(f"{section}.{k} is a whole number")
+                if section == "night" and v > 100:
+                    raise ValueError(f"{section}.{k} is 0 to 100")
+                if section == "work_hours" and v > 24:
+                    raise ValueError(f"{section}.{k} is an hour, 0 to 24")
+            elif isinstance(want, str):
+                if not isinstance(v, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+                    raise ValueError(f"{section}.{k} is a time like 22:30")
+            elif isinstance(want, list):
+                if not isinstance(v, list) or not all(isinstance(d, int) and 0 <= d <= 6 for d in v):
+                    raise ValueError(f"{section}.{k} is a list of days, Monday 0 to Sunday 6")
+            out[section][k] = v
+    return out
 
 IN_RATE = 16000       # what the device sends
 OUT_RATE = 24000      # what we send it
@@ -180,6 +230,11 @@ class Link:
         self.saying = 0      # replies being rendered or spoken: the channel stays up for them
         self.last_heard = 0.0  # when Chad last said real words: within LIVE_S, we're mid-conversation
         self.waking = False
+        self.settings = load_settings()
+        self.feed = []              # recent touches for the console: what the hand did, what it was read as, what showed
+        self.feed_seq = 0
+        self.overwhelm_state = {"running": False, "progress": 0.0}
+        self.night_now = None       # what was last sent: True, False, or None before the first look
         HEARD_DIR.mkdir(parents=True, exist_ok=True)
 
     def lodestar_headers(self):
@@ -251,16 +306,18 @@ class Link:
         finally:
             self.waking = False
 
-    async def say(self, text: str, voice: str, emotion: str | None, wake: bool = False):
+    async def say(self, text: str, voice: str, emotion: str | None, wake: bool = False, wav: bytes | None = None):
         self.saying += 1
         try:
-            return await self._say(text, voice, emotion, wake)
+            return await self._say(text, voice, emotion, wake, wav)
         finally:
             self.saying -= 1
 
-    async def _say(self, text: str, voice: str, emotion: str | None, wake: bool):
-        # the words first: rendering is the slow part, so the channel is open for as short a time as can be
-        wav = await self.speak_wav(text, voice)
+    async def _say(self, text: str, voice: str, emotion: str | None, wake: bool, wav: bytes | None = None):
+        # the words first: rendering is the slow part, so the channel is open for as short a time as can be.
+        # A saved clip is already rendered.
+        if wav is None:
+            wav = await self.speak_wav(text, voice)
         packets = await asyncio.to_thread(wav_to_opus, wav)
         woke = False
         if self.device is None and wake:
@@ -376,6 +433,91 @@ class Link:
         seconds = await self.say(text, body.get("voice") or self.args.voice, body.get("emotion"), bool(body.get("wake")))
         return web.json_response({"ok": True, "seconds": seconds})
 
+    def clip(self, name: str) -> bytes:
+        if not re.fullmatch(r"[A-Za-z0-9_\-]+", name or ""):
+            raise web.HTTPBadRequest(text="clip names are letters, digits, _ and -")
+        p = CLIPS / f"{name}.wav"
+        if not p.exists():
+            raise web.HTTPNotFound(text=f"no clip {name}")
+        return p.read_bytes()
+
+    async def clip_route(self, request):
+        """POST /clip {"name": "ahegao_take2", "emotion": "ahegao"}: play a saved sound, waking the robot for it."""
+        self.authorized(request)
+        body = await request.json()
+        seconds = await self.say("", self.args.voice, body.get("emotion"), True, self.clip(body.get("name", "")))
+        return web.json_response({"ok": True, "seconds": seconds})
+
+    async def overwhelm(self, base, headers):
+        """Tip over: the face, held through the call; a flash on the rails; the clip; then melty, then back."""
+        async def post(path, body):
+            try:
+                async with self.http.post(f"{base}{path}", headers=headers, json=body, timeout=ClientTimeout(total=4)) as r:
+                    await r.read()
+            except Exception as e:
+                log.warning("overwhelm %s: %s", path, e)
+
+        log.info("overwhelmed")
+        await post("/emotion", {"name": "ahegao", "rest": True})   # the voice code's "neutral" means ahegao for now
+        for _ in range(2):
+            await post("/leds", {"frame": [[168, 0, 110]] * 12})
+            await asyncio.sleep(0.15)
+            await post("/leds", {"frame": [[0, 0, 0]] * 12})
+            await asyncio.sleep(0.1)
+        try:
+            await self.say("", self.args.voice, None, True, self.clip("ahegao"))
+        except Exception as e:
+            log.warning("overwhelm clip: %s", e)
+            await asyncio.sleep(3)
+        await post("/emotion", {"name": "melty"})                   # and the resting pose goes with it
+        await asyncio.sleep(5)
+        await post("/emotion", {"name": "neutral"})
+
+    async def watch_night(self):
+        """Night caps for the robot's lights, speaker and screen, every minute while it's night, and off
+        when it isn't. Every minute rather than once, so a reboot at night comes back dim."""
+        token_path = STATE / "control_token"
+        headers = {"X-StackChan-Token": token_path.read_text(encoding="utf-8").strip()} if token_path.exists() else {}
+        while True:
+            n = self.settings["night"]
+            night = n["enabled"] and in_window(time.localtime(), n["start"], n["end"])
+            body = {"night": {"dimmer": n["dimmer"], "volume": n["volume"], "brightness": n["brightness"]} if night else None}
+            try:
+                async with self.http.post(f"http://{self.args.device}:8080/api/settings", headers=headers, json=body,
+                                          timeout=ClientTimeout(total=6)) as r:
+                    await r.read()
+                    if night != self.night_now:
+                        log.info("night: %s", "on" if night else "off")
+                    self.night_now = night
+            except Exception:
+                pass
+            await asyncio.sleep(60)
+
+    async def settings_get(self, request):
+        self.authorized(request)
+        return web.json_response({**self.settings, "night_now": self.night_now})
+
+    async def settings_post(self, request):
+        """POST /settings {"night": {"enabled": true, "start": "22:30"}}: only what's sent changes, saved at once."""
+        self.authorized(request)
+        try:
+            self.settings = merge_settings(self.settings, await request.json())
+        except ValueError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        tmp = SETTINGS.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.settings, indent=1), encoding="utf-8")
+        tmp.replace(SETTINGS)
+        self.night_task.cancel()                      # the new hours or caps go to the robot now
+        self.night_task = asyncio.create_task(self.watch_night())
+        return web.json_response(self.settings)
+
+    async def touch_feed(self, request):
+        """GET /touch?after=<seq>: touches since then, and where overwhelm stands."""
+        self.authorized(request)
+        after = int(request.query.get("after", "0") or 0)
+        return web.json_response({"events": [e for e in self.feed if e["seq"] > after], "last": self.feed_seq,
+                                  "overwhelm": self.overwhelm_state})
+
     async def status(self, request):
         self.authorized(request)
         return web.json_response({"ok": True, "device": self.device is not None,
@@ -389,6 +531,13 @@ class Link:
         headers = {"X-StackChan-Token": token_path.read_text(encoding="utf-8").strip()} if token_path.exists() else {}
         reader = TouchReader()
         since = 0
+        spots = None        # the names of the face's touch spots, read again after a reboot and every 30 s
+        spots_at = 0.0
+        recent = []         # the last few head touches, to tell scritching from what each bit looks like
+        overwhelm = Overwhelm()
+        knobs = None
+        kept_at = 0.0       # when melty was last renewed under a hand that hasn't lifted
+        head = None         # what the face says its head touches show, None if it doesn't
         uptime = None       # the robot's clock, and when it was read
         read_at = 0.0
 
@@ -398,16 +547,28 @@ class Link:
 
         while True:
             await asyncio.sleep(1.0)
+            o = self.settings["overwhelm"]
+            if knobs != o:       # the console changed them
+                knobs = dict(o)
+                overwhelm.after_ms, overwhelm.gap_ms, overwhelm.rest_ms = o["seconds"] * 1000, o["gap_seconds"] * 1000, o["rest_seconds"] * 1000
             try:
                 if uptime is None or time.monotonic() - read_at > 5:
                     async with self.http.get(f"{base}/status", headers=headers, timeout=ClientTimeout(total=4)) as r:
                         now_up = (await r.json(content_type=None))["uptimeMs"]
                     if uptime is None:      # first look: what's already in the feed happened before this server
                         since = now_up
-                    elif now_up < since:    # the robot rebooted, and its clock with it
+                    elif now_up < uptime:   # the robot rebooted, and its clock with it (a new face, maybe)
                         reader.reset()
                         since = 0
+                        spots = None
+                        recent = []
                     uptime, read_at = now_up, time.monotonic()
+                if spots is None or time.monotonic() - spots_at > 30:
+                    async with self.http.get(f"{base}/touch-spots", headers=headers, timeout=ClientTimeout(total=4)) as r:
+                        about = await r.json(content_type=None) if r.status == 200 else {}
+                    spots = about.get("spots", [])
+                    head = about.get("head")
+                    spots_at = time.monotonic()
                 async with self.http.get(f"{base}/touch-raw?since={since}", headers=headers,
                                          timeout=ClientTimeout(total=4)) as r:
                     text = await r.text() if r.status == 200 else ""
@@ -418,9 +579,44 @@ class Link:
                 since = rows[-1][0]
             events, sessions = reader.feed(rows, now_ms=uptime + int((time.monotonic() - read_at) * 1000))
             for e in events:
+                if e["kind"] == "touch_spot" and e["index"] < len(spots):
+                    e["spot"] = spots[e["index"]]
                 write(e)
+            recent = (recent + [e for e in events if e["kind"] in HEAD_KINDS])[-6:]
+            # overwhelm runs on the sensor's clock: every head touch, then a hand that hasn't lifted yet
+            tip = False
+            for e in events:
+                if e["kind"] in HEAD_KINDS:
+                    tip |= overwhelm.touch(e["t_ms"], e["t_ms"] + e["ms"], scritchy(e) or (overwhelm.running and scritching(recent)))
+            held = reader.open_touch()
+            if held:
+                tip |= overwhelm.touch(held[0], held[1], True, still_going=True)
             # only the last one: a burst shouldn't queue up a parade of faces
-            react = reaction_for(events[-1]) if events else None
+            react = None
+            if events:
+                last = events[-1]
+                scritch = last["kind"] in HEAD_KINDS and (last["kind"] == "scritch" or scritching(recent))
+                react = reaction_for({"kind": "scritch"} if scritch else last, head)
+            elif held and overwhelm.running and time.monotonic() - kept_at > 2:
+                # mid-scratch, the hand still down: keep the scritch face up rather than let it time out
+                react = reaction_for({"kind": "scritch"}, head)
+            if react and react == reaction_for({"kind": "scritch"}, head):
+                kept_at = time.monotonic()
+            # earned, never by accident: not with a call open, not in his work hours, not if it's switched off
+            wh = self.settings["work_hours"]
+            tipped = False
+            if tip and o["enabled"] and (head or {}).get("scritch") and self.device is None \
+                    and not work_hours(time.localtime(), (wh["start"], wh["end"]), wh["days"]):
+                asyncio.create_task(self.overwhelm(base, headers))
+                react = None
+                tipped = True
+            self.overwhelm_state = {"running": overwhelm.running, "progress": round(overwhelm.progress(), 3)}
+            for e in events:
+                self.feed_seq += 1
+                self.feed.append({"seq": self.feed_seq, "t": time.time(), **e,
+                                  "showed": (react[0] if react else None) if e is events[-1] else None,
+                                  "overwhelmed": tipped and e is events[-1]})
+            self.feed = self.feed[-300:]
             if react:
                 try:
                     async with self.http.post(f"{base}/react", headers=headers, json={"name": react[0], "ms": react[1]},
@@ -447,10 +643,12 @@ class Link:
         self.http = ClientSession()
         self.touch_task = asyncio.create_task(self.watch_touch())
         self.silence_task = asyncio.create_task(self.watch_silence())
+        self.night_task = asyncio.create_task(self.watch_night())
 
     async def on_stop(self, app):
         self.touch_task.cancel()
         self.silence_task.cancel()
+        self.night_task.cancel()
         await self.http.close()
 
 
@@ -474,7 +672,11 @@ def main():
     app.router.add_route("*", "/ota/", link.ota)
     app.router.add_get("/voice", link.voice)
     app.router.add_post("/say", link.say_route)
+    app.router.add_post("/clip", link.clip_route)
     app.router.add_get("/status", link.status)
+    app.router.add_get("/settings", link.settings_get)
+    app.router.add_post("/settings", link.settings_post)
+    app.router.add_get("/touch", link.touch_feed)
     web.run_app(app, host=args.host, port=args.port, print=None)
 
 

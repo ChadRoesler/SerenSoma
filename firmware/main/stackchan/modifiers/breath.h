@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../avatar/skins/custom/custom.h"
 #include <hal/hal.h>
 #include <cstdint>
 #include <cmath>
@@ -72,8 +73,12 @@ private:
         if (delta == 0) return;
 
         // 批量移动五官
-        move_component(avatar.leftEye(), delta);
-        move_component(avatar.rightEye(), delta);
+        // A sprite face's eye position is where the iris looks, and its travel is big enough that a
+        // breath would read as glancing up and down. Its eyes sit still; the mouth still breathes.
+        if (dynamic_cast<avatar::CustomAvatar*>(&avatar) == nullptr) {
+            move_component(avatar.leftEye(), delta);
+            move_component(avatar.rightEye(), delta);
+        }
         move_component(avatar.mouth(), delta);
 
         _last_applied_offset = new_offset;

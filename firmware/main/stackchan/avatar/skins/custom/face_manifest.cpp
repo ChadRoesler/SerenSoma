@@ -240,6 +240,10 @@ FaceManifest_t FaceManifest_t::load()
         manifest.rightEyePos = read_point(eyes["rightPos"], manifest.rightEyePos);
         manifest.socketSize  = read_point(eyes["socketSize"], manifest.socketSize);
         manifest.irisTravel  = read_point(eyes["irisTravel"], manifest.irisTravel);
+        manifest.irisOffsetLeft  = read_point(eyes["irisOffsetLeft"], manifest.irisOffsetLeft);
+        manifest.irisOffsetRight = read_point(eyes["irisOffsetRight"], manifest.irisOffsetRight);
+        manifest.irisRoom        = read_point(eyes["irisRoom"], manifest.irisRoom);
+        manifest.glanceLagMs     = clamp(read_int(eyes["glanceLagMs"], manifest.glanceLagMs), 0, 300);
 
         manifest.irisParallax = clamp(read_int(eyes["irisParallax"], manifest.irisParallax), 0, 100);
         manifest.clipRadius   = read_int(eyes["clipRadius"], manifest.clipRadius);
@@ -329,8 +333,14 @@ FaceManifest_t FaceManifest_t::load()
             pose.eyeOpen    = clamp(read_int(node["eyeOpen"], 100), 0, 100);
 
             auto brow        = read_point(node["brow"], Vector2i{0, 0});
-            pose.browOffsetY = brow.x;
-            pose.browRotation = brow.y;
+            auto browLeft    = read_point(node["browLeft"], brow);
+            auto browRight   = read_point(node["browRight"], brow);
+            pose.browOffsetY = browLeft.x;
+            pose.browRotation = browLeft.y;
+            pose.browOffsetYRight  = browRight.x;
+            pose.browRotationRight = browRight.y;
+            pose.lookLeft    = read_point(node["lookLeft"], Vector2i{0, 0});
+            pose.lookRight   = read_point(node["lookRight"], Vector2i{0, 0});
 
             pose.upperLidLeft   = read_string(node["upperLeft"], pose.upperLid);
             pose.upperLidRight  = read_string(node["upperRight"], pose.upperLid);
@@ -347,6 +357,11 @@ FaceManifest_t FaceManifest_t::load()
             pose.overlaySet = node["overlay"].is<const char*>();
             pose.overlay    = read_string(node["overlay"]);
 
+            const int mouthCycle = read_int(node["motion"]["mouth_cycle"], 0);
+            pose.mouthCycleMs    = mouthCycle > 0 ? clamp(mouthCycle, 300, 20000) : 0;
+            const int roll       = read_int(node["motion"]["roll"], 0);
+            pose.rollMs          = roll > 0 ? clamp(roll, 300, 5000) : 0;
+
             auto twitch = node["motion"]["twitch"];
             if (twitch.is<ArduinoJson::JsonObject>()) {
                 pose.twitch.on   = true;
@@ -358,7 +373,49 @@ FaceManifest_t FaceManifest_t::load()
                 pose.twitch.flutters   = clamp(read_int(twitch["flutters"], 3), 1, 10);
             }
 
+            auto lights = node["lights"];
+            if (lights.is<ArduinoJson::JsonArray>() && lights.size() == 3) {
+                pose.lightsOn = true;
+                for (int i = 0; i < 3; i++) {
+                    pose.lights[i] = clamp(lights[i].as<int>(), 0, 168);
+                }
+                const int pulse    = read_int(node["lightsPulse"], 0);
+                pose.lightsPulseMs = pulse > 0 ? clamp(pulse, 300, 10000) : 0;
+            }
+
             manifest.emotions.emplace(kv.key().c_str(), std::move(pose));
+        }
+    }
+
+    auto touch = doc["touch"];
+    if (touch.is<ArduinoJson::JsonArray>()) {
+        manifest.touchDeclared = true;
+        for (auto node : touch.as<ArduinoJson::JsonArray>()) {
+            auto rect = node["rect"];
+            if (!rect.is<ArduinoJson::JsonArray>() || rect.size() != 4) {
+                continue;
+            }
+            TouchSpot_t spot;
+            spot.name = read_string(node["name"]);
+            spot.pose = read_string(node["pose"]);
+            spot.x    = rect[0].as<int>();
+            spot.y    = rect[1].as<int>();
+            spot.w    = rect[2].as<int>();
+            spot.h    = rect[3].as<int>();
+            spot.ms   = clamp(read_int(node["ms"], 2000), 200, 15000);
+            spot.gesture = read_string(node["gesture"], "tap");
+            manifest.touchSpots.push_back(std::move(spot));
+        }
+    }
+
+    auto head = doc["head"];
+    if (head.is<ArduinoJson::JsonObject>()) {
+        manifest.headDeclared = true;
+        for (auto kv : head.as<ArduinoJson::JsonObject>()) {
+            HeadTouch_t touch;
+            touch.pose = read_string(kv.value()["pose"]);
+            touch.ms   = clamp(read_int(kv.value()["ms"], 2000), 200, 15000);
+            manifest.headTouches.emplace(kv.key().c_str(), std::move(touch));
         }
     }
 
