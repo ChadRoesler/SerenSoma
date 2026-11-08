@@ -86,6 +86,7 @@ class SomaConfig:
     advertise: str = ""        # this box as the robot reaches it; blank: worked out at startup
     voice: str = "wren"        # the voice Lodestar speaks in
     idle_close_seconds: float = 60.0
+    updates: bool = True       # "is there a newer seren-soma", checked against PyPI
     robot: RobotConfig = field(default_factory=RobotConfig)
     lodestar: LodestarConfig = field(default_factory=LodestarConfig)
 
@@ -116,7 +117,7 @@ class SomaConfig:
             lodestar_url, lodestar_token = lodestar_from_symposium(Path(os.path.expanduser(self.lodestar.symposium_yaml)))
         return Namespace(
             host=self.server.host, port=self.server.port, advertise=self.advertise or _this_box(robot_host),
-            voice=self.voice, device=robot_host, robot_url=self.robot.url, idle_close=self.idle_close_seconds,
+            voice=self.voice, device=robot_host, updates=self.updates, robot_url=self.robot.url, idle_close=self.idle_close_seconds,
             api_token=api, device_token=token_file("device_token"),
             robot_token=self.robot.auth.resolve(self.state / "control_token"), device_from=device_from,
             lodestar_url=lodestar_url.rstrip("/"), lodestar_token=lodestar_token)
@@ -170,6 +171,8 @@ def load_config(path: Optional[str] = None) -> SomaConfig:
     cfg.state_dir = str(d.get("state_dir") or cfg.state_dir)
     cfg.advertise = str(d.get("advertise") or "")
     cfg.voice = str(d.get("voice") or cfg.voice)
+    up = d.get("updates")
+    cfg.updates = bool(up.get("enabled", True)) if isinstance(up, dict) else (bool(up) if up is not None else True)
     try:
         cfg.idle_close_seconds = float(d.get("idle_close_seconds", cfg.idle_close_seconds))
     except (TypeError, ValueError):

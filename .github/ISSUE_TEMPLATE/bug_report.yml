@@ -57,4 +57,7 @@ body:
     id: logs
     attributes:
       label: Relevant logs or error output
+      description: >-
+        Easiest: open the voice server's page (http://<its box>:7480/viewer), Logs tab, "Copy for help",
+        and paste it here. That copy already has what you said to it replaced by word counts.
       render: text

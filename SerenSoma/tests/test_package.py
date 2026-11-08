@@ -96,6 +96,19 @@ def test_the_api_takes_its_own_token_and_not_the_devices(tmp_path):
     assert _serve(_cfg(tmp_path), go) == (401, 401, 200)
 
 
+def test_root_is_the_family_info_route(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.updates = False
+
+    async def go(client, rt):
+        r = await client.get("/")
+        return r.status, await r.json()
+    status, info = _serve(cfg, go)
+    assert status == 200 and info["service"] == "seren-soma" and info["viewer"] == "/viewer"
+    assert set(info["updates"]) == {"status", "distribution", "installed", "latest", "update_available", "detail", "checked_at"}
+    assert info["updates"]["status"] == "disabled"
+
+
 def test_page_and_health_are_public_logs_are_not(tmp_path):
     cfg = _cfg(tmp_path)
 

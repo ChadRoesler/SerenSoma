@@ -254,6 +254,16 @@ class Link:
         self.robot_token = args.robot_token
         self.lodestar_url, self.lodestar_token = args.lodestar_url, args.lodestar_token
         self.started = time.time()
+        # "is there a newer seren-soma": cosmetic, never fatal, the family's checker
+        try:
+            from seren_meninges.updates import UpdateChecker
+
+            from . import __version__
+            self.updates = UpdateChecker("seren-soma", enabled=getattr(args, "updates", True),
+                                         fallback_version=__version__)
+        except Exception as exc:  # noqa: BLE001
+            self.updates = None
+            log.info("update checking unavailable (%s)", exc)
         self.device: Device | None = None
         self.http: ClientSession | None = None
         self.say_lock = asyncio.Lock()
@@ -554,6 +564,20 @@ class Link:
         return web.json_response({"events": [e for e in self.feed if e["seq"] > after], "last": self.feed_seq,
                                   "overwhelm": self.overwhelm_state})
 
+    async def root(self, request):
+        """The family's info route: who this is, where its page is, and the updates block, which every
+        service carries with the same seven keys whatever state its checker is in (CI pins them)."""
+        from . import __version__
+        try:
+            from seren_meninges.updates import updates_payload
+            updates = await updates_payload(self.updates, distribution="seren-soma", installed=__version__)
+        except Exception as exc:  # noqa: BLE001 - an info route never fails over a cosmetic check
+            updates = {"status": "unavailable", "distribution": "seren-soma", "installed": __version__, "latest": None,
+                       "update_available": False, "checked_at": None,
+                       "detail": f"update checking could not be constructed ({exc}): pip install -U seren-soma"}
+        return web.json_response({"service": "seren-soma", "version": __version__, "viewer": "/viewer",
+                                  "updates": updates})
+
     async def health(self, request):
         """Public: is it up, and which version. Nothing about what it holds."""
         from . import __version__
@@ -734,6 +758,7 @@ def make_app(link: "Link", viewer_html: str = "") -> web.Application:
     app.router.add_post("/settings", link.settings_post)
     app.router.add_get("/touch", link.touch_feed)
     app.router.add_get("/health", link.health)
+    app.router.add_get("/", link.root)
     app.router.add_get("/api/about", link.about)
     app.router.add_get("/api/logs", link.logs)
     if viewer_html:
@@ -741,8 +766,5 @@ def make_app(link: "Link", viewer_html: str = "") -> web.Application:
             return web.Response(text=viewer_html, content_type="text/html",
                                 headers={"Cache-Control": "no-store, must-revalidate"})
 
-        async def root(request):
-            raise web.HTTPFound("/viewer")
         app.router.add_get("/viewer", viewer)
-        app.router.add_get("/", root)
     return app

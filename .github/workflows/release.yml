@@ -67,7 +67,6 @@ jobs:
       matrix:
         shape:
           - { label: "bare",          spec: ".",            updates: "unavailable" }
-          - { label: "[train]",    spec: ".[train]",    updates: "unavailable" }
 
     steps:
       - name: Checkout
@@ -86,27 +85,40 @@ jobs:
         env:
           SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
 
-      - name: Install a test client (NOT part of the shape under test)
-        # starlette's TestClient needs httpx at runtime. It is a test tool, not
-        # something seren_soma imports, so adding it cannot mask a missing runtime
-        # dependency - but leaving it out fails the smoke step for a reason that
-        # has nothing to do with the install shape.
-        run: pip install "httpx2" || pip install "httpx"
+      - name: Describe card answers before anything heavy is imported
+        run: |
+          cd "$(mktemp -d)"
+          seren-soma --describe | python -c "import json,sys; d=json.load(sys.stdin); assert d['name']=='seren-soma' and d['port']==7480, d; print('describe OK')"
 
       - name: Import and construct the app OUT OF TREE
+        # seren-soma is aiohttp, not FastAPI: aiohttp's own test client (part of
+        # aiohttp, a runtime dependency, so it cannot mask a missing one) serves
+        # the app the way `seren-soma` would, minus the robot and Lodestar.
         run: |
           cd "$(mktemp -d)"
           python - <<'PY'
-          from seren_soma.app import create_app
-          from fastapi.testclient import TestClient
+          import asyncio, pathlib, tempfile
+          from aiohttp.test_utils import TestClient, TestServer
+          from seren_soma import voice
+          from seren_soma.config import load_config
 
-          app = create_app()
-          print("app constructed OK")
+          d = pathlib.Path(tempfile.mkdtemp())
+          (d / "soma.yaml").write_text(
+              f"state_dir: {d / 'state'}\n"
+              "robot:\n  url: http://127.0.0.1:8080\n  token: not-a-robot\n"
+              "lodestar:\n  url: http://127.0.0.1:6361\n  token: not-a-lodestar\n")
+          cfg = load_config(str(d / "soma.yaml"))
 
-          with TestClient(app) as c:
-              r = c.get("/")
-          assert r.status_code == 200, f"/ returned {r.status_code}: {r.text[:300]}"
-          u = r.json().get("updates")
+          async def go():
+              app = voice.make_app(voice.Link(cfg.runtime()))
+              print("app constructed OK")
+              async with TestClient(TestServer(app)) as c:
+                  r = await c.get("/")
+                  assert r.status == 200, f"/ returned {r.status}: {(await r.text())[:300]}"
+                  return await r.json()
+
+          info = asyncio.run(go())
+          u = info.get("updates")
 
           assert isinstance(u, dict), f"/ must always carry an updates dict, got {u!r}"
           expected = {"status", "distribution", "installed", "latest",
