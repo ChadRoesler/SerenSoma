@@ -2,8 +2,8 @@
   <div class="card">
     <h3>The body</h3>
     <div id="facts" class="facts muted">Looking…</div>
-    <p class="muted tiny">To watch it and change how it behaves, use SerenPsycheion. This page is for checking
-      it's alive and, if something's wrong, sending its log to whoever's helping.</p>
+    <p class="muted tiny">This page builds the body: setting the robot up, its firmware, and its log for whoever's
+      helping. Its faces, and watching and feeling how it's touched, are SerenPsycheion's.</p>
   </div>
 </section>
 
@@ -19,5 +19,55 @@
     <p class="muted tiny">What you say to it never leaves this page: each thing it heard shows as how many words, and
       a token as &lt;token&gt;. Paste what you copy anywhere you like.</p>
     <pre id="logText" class="log">…</pre>
+  </div>
+</section>
+
+<section class="view" id="setup">
+  <div class="card">
+    <h3>Set up the robot</h3>
+    <p class="muted tiny">Everything that makes this robot <em>yours</em>: its Wi-Fi, the voice server it checks in with
+      (this box, unless you say otherwise), the token its control API asks for, and a tailnet if you use one. Leave a
+      box empty to leave that alone. A robot on the network takes these straight away and reboots; one that isn't yet
+      (a new one, or one whose Wi-Fi changed) gets them from a <code>soma.yaml</code> on its microSD card, which it
+      reads once at boot and deletes. No Wi-Fi password is kept here.</p>
+    <h4>Wi-Fi</h4>
+    <label class="field"><span>Network</span><input id="suSsid" maxlength="32" autocomplete="off" placeholder="leave as it is"></label>
+    <label class="field"><span>Password</span><input id="suPass" type="password" maxlength="64" autocomplete="new-password"></label>
+    <h4>Voice server</h4>
+    <label class="field"><span>Address</span><input id="suVoice" maxlength="128" placeholder="auto: this box"></label>
+    <h4>Token</h4>
+    <label class="row"><input type="checkbox" id="suRotate"> <span class="tiny">Give the robot a new token</span></label>
+    <p class="muted tiny">The robot takes it first, then this box writes it down, then the robot reboots onto it. If the
+      robot says no, nothing changes. A Workbench or Psycheion pointed at the same token file picks it up by itself.</p>
+    <h4>Tailnet (only on a build that has one)</h4>
+    <label class="field"><span>Auth key</span><input id="suTsKey" type="password" maxlength="128" autocomplete="off"></label>
+    <label class="field"><span>Device name</span><input id="suTsName" maxlength="63" placeholder="soma"></label>
+    <div class="row">
+      <button class="btn primary" id="suSend">Send to the robot (it reboots)</button>
+      <button class="btn" id="suCard">Download soma.yaml for the card</button>
+    </div>
+    <div class="msg tiny" id="suMsg"></div>
+  </div>
+</section>
+
+<section class="view" id="firmware">
+  <div class="card">
+    <h3>Firmware</h3>
+    <div class="facts" id="fwFacts"></div>
+    <p class="muted tiny">Fetch a release (checked against its SHA256SUMS) or stage a build of your own
+      (<code>stack-chan.bin</code>), then install it: the robot is offered it once, on its next check-in, shows its
+      progress, and reboots into it. If the new one can't check in, it goes back to the old one on the next reboot.</p>
+    <div class="row">
+      <button class="btn" id="fwFetch">Fetch the latest release</button>
+    </div>
+    <div class="row">
+      <span class="tiny">or a build of your own</span>
+      <input type="file" id="fwFile" accept=".bin">
+      <input id="fwVersion" maxlength="32" placeholder="its version, e.g. 0.2.0-mine">
+      <button class="btn" id="fwUpload">Stage it</button>
+    </div>
+    <table class="staged"><thead><tr><th>Staged</th><th>From</th><th>Size</th><th></th></tr></thead>
+      <tbody id="fwRows"></tbody></table>
+    <div class="msg tiny" id="fwMsg"></div>
   </div>
 </section>

@@ -202,3 +202,12 @@ def test_a_blank_voice_is_left_to_lodestar(tmp_path):
                 await link.speak_wav("hi", "alto")
     asyncio.run(go())
     assert "voice" not in bodies[0] and bodies[1]["voice"] == "alto"
+
+
+def test_the_page_builds_the_body_set_up_and_firmware_included():
+    from pathlib import Path
+
+    from seren_meninges.viewer import render_from_dir
+    html = render_from_dir(Path(voice.__file__).parent / "viewer" / "ui", title="SerenSoma", brand="Seren<b>Soma</b>")
+    for want in ('data-tab="setup"', 'data-tab="firmware"', 'id="suSend"', 'id="fwFetch"', "/robot/config", "/firmware/install"):
+        assert want in html, want

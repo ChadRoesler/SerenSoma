@@ -100,7 +100,7 @@ token for its voice connection, and the check-in only answers the robot's own ad
 
 | | |
 |---|---|
-| `GET /viewer` | Is it alive, and its log, for sending to whoever's helping (no token to open the page; the 🔑 asks for it). |
+| `GET /viewer` | The page that builds the body: is it alive, **Set up** (the robot's Wi-Fi, voice server, token and tailnet, sent to it or as a `soma.yaml` for its card), **Firmware** (fetch a release or stage your own build, then install it), and its log for whoever's helping. No token to open the page; the 🔑 asks for it. Faces and touch are SerenPsycheion's. |
 | `POST /say` | Speak through the robot (`wake` opens the channel to do it). |
 | `GET`/`POST /settings` | Night (hours and caps for lights, speaker and screen), work hours, and how long unbroken scratching takes to tip the face over. |
 | `GET /touch` | The live touch feed, for a console. |
