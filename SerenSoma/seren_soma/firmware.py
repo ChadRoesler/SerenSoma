@@ -175,10 +175,19 @@ def pick_release(releases: list[dict], version: str) -> dict:
     raise FirmwareError(f"no release fw-v{v}")
 
 
-def asset_url(release: dict, name: str) -> str:
+def asset_sources(release: dict, name: str) -> list[tuple[str, dict]]:
+    """Where to download an asset, best first: the API's own asset URL (asked for as octet-stream),
+    then the web link. They're different front doors: on 8 Nov 2026 the web one answered 504 for
+    every asset, from every network, while the API one served the 12 MB image in 1.5 s."""
     for a in release.get("assets", []):
         if a.get("name") == name:
-            return a["browser_download_url"]
+            out = []
+            if a.get("url"):
+                out.append((a["url"], {"User-Agent": "seren-soma", "Accept": "application/octet-stream"}))
+            if a.get("browser_download_url"):
+                out.append((a["browser_download_url"], {"User-Agent": "seren-soma"}))
+            if out:
+                return out
     raise FirmwareError(f"release {release.get('tag_name')} has no {name}")
 
 

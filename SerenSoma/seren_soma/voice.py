@@ -24,7 +24,7 @@ from pathlib import Path
 
 import av
 import numpy as np
-from aiohttp import ClientSession, ClientTimeout, FormData, WSMsgType, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, WSMsgType, web
 
 from .touch_read import HEAD_KINDS, Overwhelm, TouchReader, in_window, reaction_for, scritching, scritchy, work_hours
 
@@ -515,6 +515,44 @@ class Link:
             "repo": getattr(self.args, "firmware_repo", ""),
         })
 
+    # GitHub's release CDN answers 504 (and crawls) for a while after a release is published:
+    # 8 Nov 2026, fw-v0.5.0's 174-byte SHA256SUMS was a 504 twice, then 0.1 s three times.
+    GITHUB_RETRY_S = (3.0, 8.0)          # waits between tries: three tries in all
+    GITHUB_TRANSIENT = {429, 500, 502, 503, 504}
+
+    async def _from_github(self, url: str, headers: dict, timeout_s: float, what: str) -> bytes:
+        """GET it, trying again on a status or a failure that passes; any other answer is final."""
+        from . import firmware as fw
+        last = ""
+        for attempt, wait in enumerate((0.0, *self.GITHUB_RETRY_S)):
+            if wait:
+                log.info("%s: %s, trying again in %.0fs", what, last, wait)
+                await asyncio.sleep(wait)
+            try:
+                async with self.http.get(url, headers=headers, timeout=ClientTimeout(total=timeout_s)) as r:
+                    if r.status == 200:
+                        return await r.read()
+                    if r.status not in self.GITHUB_TRANSIENT:
+                        raise fw.FirmwareError(f"{what} answered {r.status}")
+                    last = f"answered {r.status}"
+            except fw.FirmwareError:
+                raise
+            except (asyncio.TimeoutError, ClientError) as e:
+                last = f"{type(e).__name__} {e}".strip()
+        raise fw.FirmwareError(f"{what} {last}, {1 + len(self.GITHUB_RETRY_S)} tries (GitHub can be slow for a few "
+                               "minutes after a release; try again shortly)")
+
+    async def _asset(self, sources: list, what: str) -> bytes:
+        """The first of an asset's sources that gives it up, each tried with its retries."""
+        from . import firmware as fw
+        errors = []
+        for url, headers in sources:
+            try:
+                return await self._from_github(url, headers, 60, what)
+            except fw.FirmwareError as e:
+                errors.append(str(e))
+        raise fw.FirmwareError("; ".join(errors))
+
     async def firmware_fetch(self, request):
         """POST /firmware/fetch {"version": "latest" | "0.1.1"}: the release's update zip, checked
         against its SHA256SUMS, its app image staged here."""
@@ -528,18 +566,12 @@ class Link:
         repo = getattr(self.args, "firmware_repo", "")
         gh = {"Accept": "application/vnd.github+json", "User-Agent": "seren-soma"}
         try:
-            async with self.http.get(f"https://api.github.com/repos/{repo}/releases?per_page=30", headers=gh,
-                                     timeout=ClientTimeout(total=20)) as r:
-                if r.status != 200:
-                    raise fw.FirmwareError(f"GitHub said {r.status} for {repo}'s releases")
-                release = fw.pick_release(await r.json(), want)
+            listing = await self._from_github(f"https://api.github.com/repos/{repo}/releases?per_page=30", gh, 20,
+                                              f"{repo}'s releases")
+            release = fw.pick_release(json.loads(listing), want)
             fetched = {}
             for name in (fw.UPDATE_ZIP.format(v=release["tag_name"][4:]), "SHA256SUMS"):
-                async with self.http.get(fw.asset_url(release, name), headers={"User-Agent": "seren-soma"},
-                                         timeout=ClientTimeout(total=120)) as r:
-                    if r.status != 200:
-                        raise fw.FirmwareError(f"downloading {name} answered {r.status}")
-                    fetched[name] = await r.read()
+                fetched[name] = await self._asset(fw.asset_sources(release, name), f"downloading {name}")
             zip_name = fw.UPDATE_ZIP.format(v=release["tag_name"][4:])
             app = fw.verified_app(release, fetched[zip_name], fetched["SHA256SUMS"].decode("utf-8", "replace"))
             entry = fw.stage_bytes(self._fw_state(), release["tag_name"], app, f"release {release['tag_name']}")

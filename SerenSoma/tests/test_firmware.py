@@ -29,7 +29,7 @@ def _zip(v="0.1.1", app=APP):
 def _release(v="0.1.1", **kw):
     names = [f"soma-{v}-update.zip", "SHA256SUMS", f"soma-{v}-full.bin"]
     return {"tag_name": f"fw-v{v}", "draft": False, "prerelease": False, "published_at": kw.get("at", "2026-11-08"),
-            "assets": [{"name": n, "browser_download_url": f"https://x/{n}"} for n in names]}
+            "assets": [{"name": n, "url": f"https://api/{n}", "browser_download_url": f"https://x/{n}"} for n in names]}
 
 
 # -- the checks ----------------------------------------------------------------------------------
@@ -155,3 +155,66 @@ def test_a_bad_upload_or_an_unstaged_version_is_said_so(tmp_path):
         return full.status, await full.text(), missing.status, link.firmware_armed, rebooted
     full, text, missing, armed, rebooted = _serve(tmp_path, go)
     assert full == 400 and "app image" in text and missing == 404 and armed is None and rebooted == []
+
+
+def _github(tmp_path, answers, go):
+    """A stand-in for GitHub that answers each request with the next status in answers."""
+    seen = []
+
+    async def asset(request):
+        seen.append(1)
+        status = answers[min(len(seen), len(answers)) - 1]
+        return web.Response(status=status, body=b"sums" if status == 200 else b"")
+
+    async def run():
+        gh = web.Application()
+        gh.router.add_get("/asset", asset)
+        async with TestServer(gh) as server:
+            y = tmp_path / "soma.yaml"
+            y.write_text(f"state_dir: {str(tmp_path / 'state').replace(chr(92), '/')}\nrobot:\n  url: http://127.0.0.1:9\n"
+                         "lodestar:\n  url: http://l:1\n  token: t\n", encoding="utf-8")
+            link = voice.Link(load_config(str(y)).runtime())
+            link.GITHUB_RETRY_S = (0.0, 0.0)
+            async with TestClient(TestServer(voice.make_app(link))):
+                return await go(link, str(server.make_url("/asset"))), len(seen)
+    return asyncio.run(run())
+
+
+
+def test_a_504_then_a_200_is_a_download(tmp_path):
+    async def go(link, url):
+        return await link._from_github(url, {}, 5, "downloading SHA256SUMS")
+    body, tries = _github(tmp_path, [504, 504, 200], go)
+    assert body == b"sums" and tries == 3
+
+
+def test_a_404_is_final_at_once(tmp_path):
+    async def go(link, url):
+        with pytest.raises(fw.FirmwareError, match="answered 404"):
+            await link._from_github(url, {}, 5, "downloading SHA256SUMS")
+    _, tries = _github(tmp_path, [404], go)
+    assert tries == 1
+
+
+def test_github_down_every_time_says_so_and_how_often(tmp_path):
+    async def go(link, url):
+        with pytest.raises(fw.FirmwareError, match="answered 504, 3 tries"):
+            await link._from_github(url, {}, 5, "downloading SHA256SUMS")
+    _, tries = _github(tmp_path, [504], go)
+    assert tries == 3
+
+
+def test_the_api_door_comes_first_then_the_web_one():
+    first, second = fw.asset_sources(_release(), "SHA256SUMS")
+    assert first == ("https://api/SHA256SUMS", {"User-Agent": "seren-soma", "Accept": "application/octet-stream"})
+    assert second[0] == "https://x/SHA256SUMS"
+    with pytest.raises(fw.FirmwareError, match="has no"):
+        fw.asset_sources(_release(), "nope.bin")
+
+
+def test_when_the_api_door_fails_the_web_one_is_tried(tmp_path):
+    async def go(link, url):
+        broken = url.replace("/asset", "/missing")             # a 404 there: final for that door
+        return await link._asset([(broken, {}), (url, {})], "downloading SHA256SUMS")
+    body, tries = _github(tmp_path, [200], go)
+    assert body == b"sums" and tries == 1
