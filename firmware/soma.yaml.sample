@@ -1,0 +1,34 @@
+# ════════════════════════════════════════════════════════════════════════
+#  soma.yaml - copy to the root of the robot's microSD card as soma.yaml
+# ════════════════════════════════════════════════════════════════════════
+#
+# Everything that makes one robot *this* robot, so the firmware itself carries
+# no secrets. Read once at boot, saved on the robot, then DELETED from the card,
+# so a password or token never outlives one boot on a card that moves around.
+#
+# Every key is optional. A key that's here replaces what the robot has saved.
+# An empty one (token: "") forgets it, and the firmware's own default comes back.
+# A key that's left out stays as it was.
+#
+# Not full YAML: "key: value" lines, one level of nesting, # comments. Put a value
+# in quotes if it has " #" in it.
+#
+# Check it took: GET http://<robot>:8080/api/status shows "config": where the
+# token and voice server came from ("card" or "build"), never what they are.
+
+wifi:
+  ssid: MyNetwork
+  password: "hunter2"          # blank for an open network
+
+# The box running seren-soma. A bare host gets :7480 and /ota/ added.
+voice: 192.168.0.200
+
+# What the control API (port 8080) asks for in X-StackChan-Token. Put the same
+# one in the voice server's state folder as control_token. No token anywhere
+# means anything on your network can move the robot, and its boot log says so.
+token: "make-this-long-and-random"
+
+# Only does anything on a build with the tailnet compiled in.
+# tailnet:
+#   key: tskey-auth-...
+#   name: soma

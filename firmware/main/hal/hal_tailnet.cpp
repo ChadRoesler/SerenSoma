@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include "soma_config.h"
 #include <mooncake_log.h>
 #include <sdkconfig.h>
 
@@ -114,11 +115,15 @@ void Hal::startTailnet(std::function<void(std::string_view)> onLog)
         return;
     }
 
-    const char* auth_key = CONFIG_STACKCHAN_TAILNET_AUTH_KEY;
-    if (auth_key == nullptr || std::strlen(auth_key) == 0) {
+    // microlink keeps the pointers, so these outlive the call. soma.yaml's, else the build's.
+    static std::string auth_key;
+    static std::string device_name;
+    auth_key    = soma_config::tailnet_key();
+    device_name = soma_config::tailnet_name();
+    if (auth_key.empty()) {
         // Not a failure: the feature is compiled in but unconfigured.
         mclog::tagWarn(_tag, "no auth key set, skipping tailnet "
-                             "(set CONFIG_STACKCHAN_TAILNET_AUTH_KEY in sdkconfig.defaults.local)");
+                             "(put tailnet: key: in soma.yaml on the SD card)");
         if (onLog) {
             onLog("Tailnet: no auth key, skipped");
         }
@@ -141,8 +146,8 @@ void Hal::startTailnet(std::function<void(std::string_view)> onLog)
     }
 
     microlink_config_t config = {};
-    config.auth_key           = auth_key;
-    config.device_name        = CONFIG_STACKCHAN_TAILNET_DEVICE_NAME;
+    config.auth_key           = auth_key.c_str();
+    config.device_name        = device_name.c_str();
     config.enable_derp        = STACKCHAN_TAILNET_DERP;
     config.enable_stun        = true;
     config.enable_disco       = true;

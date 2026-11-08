@@ -1,0 +1,141 @@
+name: Firmware release
+
+# The robot's firmware, on its own tags (fw-v0.1.0), apart from the seren-soma
+# package's v* tags: the two ship on different clocks, and a voice server fix
+# shouldn't make anyone reflash a robot.
+#
+# Pull requests and manual runs build and keep the images as a workflow
+# artifact; only a fw-v* tag makes a GitHub Release.
+
+on:
+  push:
+    tags: ["fw-v*"]
+  pull_request:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    name: "Host tests"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run
+        working-directory: firmware
+        run: |
+          cmake -S tests -B build-host-tests
+          cmake --build build-host-tests
+          ctest --test-dir build-host-tests --output-on-failure
+
+  build:
+    runs-on: ubuntu-latest
+    name: "Build (ESP-IDF 6.1)"
+    container: espressif/idf:v6.1
+    defaults:
+      run:
+        shell: bash
+        working-directory: firmware
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch dependencies and apply patches
+        run: |
+          # The container's user doesn't own the workspace; git refuses it otherwise.
+          git config --global --add safe.directory '*'
+          python3 fetch_repos.py
+
+      - name: Nothing per-robot in the tree
+        # sdkconfig.defaults.local holds a builder's own token, tailnet key and voice server.
+        # It is git-ignored so it can't be here, but a release must never be built with one.
+        run: |
+          for f in sdkconfig sdkconfig.defaults.local; do
+            if [ -e "$f" ]; then echo "::error::$f is in the checkout; a release builds from sdkconfig.defaults only"; exit 1; fi
+          done
+
+      - name: Build
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py build
+
+      - name: The build carries no secrets and no address
+        # Per robot, these come from soma.yaml on the SD card. Checked by name; values never printed.
+        run: |
+          bad=0
+          for k in CONFIG_STACKCHAN_CONTROL_TOKEN CONFIG_STACKCHAN_TAILNET_AUTH_KEY CONFIG_OTA_URL; do
+            line=$(grep "^$k=" sdkconfig || true)
+            if [ -n "$line" ] && [ "$line" != "$k=\"\"" ]; then
+              echo "::error::$k is set in a release build"
+              bad=1
+            fi
+          done
+          exit $bad
+
+      - name: Version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/fw-v* ]]; then
+            v="${GITHUB_REF_NAME#fw-v}"
+          else
+            v="dev-${GITHUB_SHA::7}"
+          fi
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        # full: one image from 0x0, for a new robot. It erases what the robot had saved
+        #       (Wi-Fi, token), so soma.yaml on the card sets them again.
+        # update: the parts at their offsets (flash_args). Leaves saved settings alone.
+        run: |
+          . "$IDF_PATH/export.sh"
+          v="${{ steps.ver.outputs.v }}"
+          out="$GITHUB_WORKSPACE/out"
+          mkdir -p "$out"
+
+          cd build
+          python -m esptool --chip esp32s3 merge-bin -o "$out/soma-$v-full.bin" @flash_args
+
+          pkg="$out/soma-$v-update"
+          mkdir -p "$pkg"
+          cp flash_args "$pkg/"
+          # Every line after the first is "<offset> <file>".
+          tail -n +2 flash_args | while read -r _ file; do
+            mkdir -p "$pkg/$(dirname "$file")"
+            cp "$file" "$pkg/$file"
+          done
+          cp ../soma.yaml.sample "$pkg/"
+          # Python, not zip: the IDF image isn't promised to have zip.
+          (cd "$out" && python -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', '.', sys.argv[1])" "soma-$v-update" && rm -rf "soma-$v-update")
+          cp ../soma.yaml.sample "$out/soma.yaml.sample"
+
+          cd "$out" && sha256sum soma-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: Keep the images
+        uses: actions/upload-artifact@v4
+        with:
+          name: soma-firmware-${{ steps.ver.outputs.v }}
+          path: out/
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/fw-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Soma firmware ${{ steps.ver.outputs.v }}
+          files: out/*
+          generate_release_notes: true
+          body: |
+            Firmware for a Soma body (M5Stack CoreS3 Stack-chan). No secrets inside, the same file for every robot.
+
+            **New robot:** flash `soma-${{ steps.ver.outputs.v }}-full.bin` at `0x0`, from a browser at
+            https://espressif.github.io/esptool-js/ or with
+            `python -m esptool --chip esp32s3 write-flash 0x0 soma-${{ steps.ver.outputs.v }}-full.bin`.
+            This erases whatever the robot had saved.
+
+            **Already a Soma:** unzip `soma-${{ steps.ver.outputs.v }}-update.zip` and, inside it,
+            `python -m esptool --chip esp32s3 write-flash @flash_args`. Wi-Fi, token and settings stay.
+
+            **Then** copy `soma.yaml.sample` to the SD card as `soma.yaml`, fill in your Wi-Fi, the box
+            running `seren-soma`, and a token, and boot. The robot reads it, saves it and deletes it.

@@ -28,6 +28,7 @@
  */
 #include "sd_assets.h"
 #include "face_push.h"
+#include "soma_config.h"
 #include <mooncake_log.h>
 #include <driver/gpio.h>
 #include <driver/spi_common.h>
@@ -302,6 +303,7 @@ bool sd_assets::load()
                    static_cast<uint32_t>(((uint64_t)card->csd.capacity * card->csd.sector_size) / (1024 * 1024)));
 
     apply_wifi_file();
+    soma_config::apply_card_file();  // after wifi.txt, so soma.yaml wins if both are there
     face_push::apply_to_card();
 
     size_t total = 0;

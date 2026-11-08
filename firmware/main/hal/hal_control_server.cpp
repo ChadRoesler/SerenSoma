@@ -57,6 +57,7 @@
 #include "ram_map.h"
 #include "face_push.h"
 #include "touch_log.h"
+#include "soma_config.h"
 #include "hal.h"
 #include <mooncake_log.h>
 #include <sdkconfig.h>
@@ -88,8 +89,9 @@ httpd_handle_t _server = nullptr;
 
 bool token_ok(httpd_req_t* req)
 {
-    const char* expected = CONFIG_STACKCHAN_CONTROL_TOKEN;
-    if (expected == nullptr || std::strlen(expected) == 0) {
+    // soma.yaml's token, else the build's. See soma_config.h.
+    const std::string& expected = soma_config::control_token();
+    if (expected.empty()) {
         return true;  // no token configured, open on the LAN
     }
 
@@ -97,7 +99,7 @@ bool token_ok(httpd_req_t* req)
     if (httpd_req_get_hdr_value_str(req, "X-StackChan-Token", got, sizeof(got)) != ESP_OK) {
         return false;
     }
-    return std::strcmp(got, expected) == 0;
+    return expected == got;
 }
 
 esp_err_t send_json(httpd_req_t* req, cJSON* root, const char* status = "200 OK")
@@ -212,6 +214,11 @@ void apply_settings()
 
 void add_settings(cJSON* root)
 {
+    // Where the per-body settings came from (soma.yaml or the build), never their values.
+    cJSON* c = cJSON_AddObjectToObject(root, "config");
+    cJSON_AddStringToObject(c, "token", soma_config::control_token_source());
+    cJSON_AddStringToObject(c, "voice", soma_config::voice_source());
+
     cJSON* s = cJSON_AddObjectToObject(root, "settings");
     cJSON_AddNumberToObject(s, "dimmer", hal_bridge::soma_setting("dimmer", 100));
     cJSON_AddNumberToObject(s, "volume", hal_bridge::board_get_speaker_volume());
@@ -1034,9 +1041,8 @@ void start_httpd()
         httpd_register_uri_handler(_server, &route);
     }
 
-    const char* token = CONFIG_STACKCHAN_CONTROL_TOKEN;
     mclog::tagInfo(_tag, "control server on port {} ({})", CONFIG_STACKCHAN_CONTROL_PORT,
-                   (token && std::strlen(token)) ? "token required" : "NO AUTH - LAN open");
+                   soma_config::control_token().empty() ? "NO AUTH - LAN open" : "token required");
 }
 
 }  // namespace

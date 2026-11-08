@@ -42,10 +42,30 @@ built-in body tools (`soma_status`, `soma_say`, `soma_pose`...), which can be
 switched off for a Workbench with no body. Watching it and making its faces is
 [SerenPsycheion](https://github.com/ChadRoesler/SerenPsycheion).
 
+## Setting up a robot
+
+The firmware carries no secrets, so a release build is the same file for every robot. What makes
+yours *yours* goes on its microSD card as one file, `soma.yaml`:
+
+```yaml
+wifi:
+  ssid: MyNetwork
+  password: "hunter2"
+voice: 192.168.0.200        # the box running seren-soma
+token: "long-and-random"    # what the control API asks for
+```
+
+The robot reads it once at boot, saves it, and **deletes it from the card**, so a password never
+rides around on a card. Every key is optional, an empty one forgets what was saved, and
+`GET /api/status` says where each came from (`"card"` or `"build"`) without saying what it is.
+[`firmware/soma.yaml.sample`](firmware/soma.yaml.sample) has all of it. (`wifi.txt`, SSID on the
+first line and password on the second, still works for just the Wi-Fi.)
+
 ## The control API (firmware, port 8080)
 
-Every call needs `X-StackChan-Token`, set at build time in
-`firmware/sdkconfig.defaults.local` (git-ignored). A build with no token takes
+Every call needs `X-StackChan-Token`, set in `soma.yaml` on the robot's SD card
+(see [Setting up a robot](#setting-up-a-robot)), or at build time in
+`firmware/sdkconfig.defaults.local` (git-ignored). A robot with no token takes
 calls from anything on the network, and says so in its boot log.
 
 | | |
@@ -67,9 +87,8 @@ seren-soma --describe       # one line of JSON, for installers
 ```
 
 It belongs on an always-on box on the robot's network: night mode, touch reactions and the mind's
-voice all live in it. The robot finds it through the check-in address set in its firmware
-(`CONFIG_OTA_URL` in `firmware/sdkconfig.defaults.local`), so moving it means pointing that at the
-new box and flashing once. [`SerenSoma/seren-soma.yaml.sample`](SerenSoma/seren-soma.yaml.sample) has
+voice all live in it. The robot finds it through `voice:` in `soma.yaml`, so moving it to another
+box is one line on the SD card and a reboot, no flashing. [`SerenSoma/seren-soma.yaml.sample`](SerenSoma/seren-soma.yaml.sample) has
 every setting.
 
 **Two tokens.** The API token, `token` in the state folder (made the first time, or

@@ -1,5 +1,5 @@
 diff --git a/main/application.cc b/main/application.cc
-index 31de205..50096d8 100644
+index 31de205..538ae52 100644
 --- a/main/application.cc
 +++ b/main/application.cc
 @@ -1,4 +1,5 @@
@@ -8,7 +8,7 @@ index 31de205..50096d8 100644
  #include "assets.h"
  #include "assets/lang_config.h"
  #include "audio_codec.h"
-@@ -442,6 +443,7 @@ void Application::CheckAssetsVersion() {
+@@ -442,9 +443,20 @@ void Application::CheckAssetsVersion() {
  void Application::CheckNewVersion() {
      const int MAX_RETRY = 10;
      int retry_count = 0;
@@ -16,7 +16,20 @@ index 31de205..50096d8 100644
      int retry_delay = 10;  // Initial retry delay in seconds
  
      auto& board = Board::GetInstance();
-@@ -499,15 +501,18 @@ void Application::CheckNewVersion() {
++
++    // SerenSoma: a release build has no check-in address of its own (no cloud to phone home to),
++    // so until soma.yaml names a voice server there is nowhere to go. Say so once, rather than
++    // ten retries with an alarm each.
++    if (ota_->GetCheckVersionUrl().length() < 10) {
++        ESP_LOGW(TAG, "No voice server set: put voice: in soma.yaml on the SD card");
++        board.GetDisplay()->SetStatus("No voice server");
++        return;
++    }
++
+     while (true) {
+         auto display = board.GetDisplay();
+         display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+@@ -499,15 +511,18 @@ void Application::CheckNewVersion() {
  
          // No new version, mark the current version as valid
          ota_->MarkCurrentVersionValid();
@@ -39,7 +52,7 @@ index 31de205..50096d8 100644
          }
  
          // This will block the loop until the activation is done or timeout
-@@ -725,30 +730,6 @@ void Application::InitializeProtocol() {
+@@ -725,30 +740,6 @@ void Application::InitializeProtocol() {
      protocol_->Start();
  }
  
@@ -70,7 +83,7 @@ index 31de205..50096d8 100644
  void Application::Alert(const char* status, const char* message, const char* emotion,
                          const std::string_view& sound) {
      ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
-@@ -833,6 +814,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+@@ -833,6 +824,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
          if (!protocol_->OpenAudioChannel()) {
              // Return to idle so the device is not stuck in the connecting
              // state (not every failure path reports a network error)
@@ -78,7 +91,7 @@ index 31de205..50096d8 100644
              SetDeviceState(kDeviceStateIdle);
              return;
          }
-@@ -970,6 +952,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+@@ -970,6 +962,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
              // Return to idle so the device is not stuck in the connecting
              // state (not every failure path reports a network error), and
              // wake word detection is re-enabled by the idle state handler.

@@ -37,6 +37,9 @@ config STACKCHAN_CONTROL_TOKEN
     help
         When set, every request must carry it in an X-StackChan-Token header.
 
+        A token in soma.yaml on the SD card (token:) replaces this one, which
+        is how a release build, built with it blank, gets one.
+
         Left blank, anything on your LAN can move the servos and change the
         face. That is fine on a trusted network and a bad idea otherwise.
         Put real values in sdkconfig.defaults.local, not a committed defconfig.
@@ -100,6 +103,9 @@ config STACKCHAN_TAILNET_AUTH_KEY
 
         Put this in sdkconfig.defaults.local (git-ignored), never in a
         committed defconfig. scan_secrets.py exists for a reason.
+
+        Better: leave it blank and put it in soma.yaml on the SD card
+        (tailnet: key:), which replaces this one and is never compiled in.
 
 config STACKCHAN_TAILNET_DEVICE_NAME
     string "Tailnet device name"

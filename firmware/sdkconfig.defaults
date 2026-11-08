@@ -10,6 +10,10 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_LANGUAGE_EN_US=y
 CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN=y
 CONFIG_USE_HOTSPOT_WIFI_PROVISIONING=n
+# No check-in address of its own: Xiaozhi's default is its cloud (api.tenclass.net), which a Seren
+# body never talks to. Set per robot with voice: in soma.yaml, or for your own builds in
+# sdkconfig.defaults.local.
+CONFIG_OTA_URL=""
 CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=n
 CONFIG_SEND_WAKE_WORD_DATA=n
 CONFIG_SR_WN_WN9L_HISTACKCHAN_TTS3=y

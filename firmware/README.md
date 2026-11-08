@@ -33,6 +33,25 @@ ctest --test-dir build-host-tests --output-on-failure
 idf.py flash
 ```
 
+## Per-robot settings: `soma.yaml`
+
+Wi-Fi, the voice server's address, the control token and the tailnet key come
+from `soma.yaml` on the SD card, read once at boot, saved to NVS and deleted.
+See [`soma.yaml.sample`](soma.yaml.sample). The matching `CONFIG_*` values in
+`sdkconfig.defaults.local` still work as the build's defaults, for your own
+builds; a release build leaves them blank. Parsing lives in
+[`main/hal/soma_config.cpp`](main/hal/soma_config.cpp).
+
+## Releases
+
+A `fw-v*` tag (`fw-v0.1.0`) builds in the ESP-IDF 6.1 container from a clean
+checkout, fails if the build carries a token, tailnet key or check-in address,
+and attaches two images to a GitHub Release: `-full.bin` (one file at `0x0`,
+for a new robot, erases saved settings) and `-update.zip` (the parts and
+`flash_args`, keeps them). See
+[`.github/workflows/firmware-release.yml`](../.github/workflows/firmware-release.yml).
+The package's `v*` tags and the firmware's `fw-v*` tags never build each other.
+
 ## Customization
 
 ### Custom faces
