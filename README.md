@@ -35,8 +35,12 @@ Everything in `seren-voice/state/` is git-ignored, tokens included.
 |---|---|
 | [`firmware/`](firmware/) | The robot's firmware, ESP-IDF 6.1 on the CoreS3. Sprite faces, the token-guarded control API, the light rails, the head sensor, sending a face over Wi-Fi. [`firmware/docs/custom-faces.md`](firmware/docs/custom-faces.md) is the face format. |
 | [`seren-voice/`](seren-voice/) | The nervous system. Speaks the robot's voice protocol, hears through the speech service, reads the head sensor into strokes, pokes, scritches and resting hands, and turns them into faces. Owns night mode and work hours. |
-| [`mcp/`](mcp/) | An MCP server that drives the robot as tools. |
 | `firmware/tools/` | `face.py` (build a face from PNGs) and Face Studio, until they move to SerenPsycheion. |
+
+A mind drives the body through [SerenWorkbench](https://github.com/ChadRoesler/SerenWorkbench)'s
+built-in body tools (`soma_status`, `soma_say`, `soma_pose`...), which can be
+switched off for a Workbench with no body. Watching it and making its faces is
+[SerenPsycheion](https://github.com/ChadRoesler/SerenPsycheion).
 
 ## The control API (firmware, port 8080)
 
@@ -94,8 +98,15 @@ Stack-chan's community made it what it is; thanks especially to
 [@stack_chan](https://x.com/stack_chan) (Shinya Ishikawa) and
 [@mongonta555](https://x.com/mongonta555) (Takao Akaki).
 
-The firmware is under the MIT License, © 2026 M5Stack Technology CO LTD
-([`firmware/LICENSE`](firmware/LICENSE)). Its voice stack is
-[xiaozhi-esp32](https://github.com/78/xiaozhi-esp32), MIT, © 2025 Shenzhen
-Xinzhi Future Technology Co., Ltd.
-([`firmware/xiaozhi-esp32/LICENSE`](firmware/xiaozhi-esp32/LICENSE)).
+## License
+
+Two licenses, split by folder:
+
+- **`firmware/`** stays under the MIT License, as Stack-chan is: © 2026 M5Stack
+  Technology CO LTD, and Soma's changes to it are MIT too, so a fix can go
+  back upstream ([`firmware/LICENSE`](firmware/LICENSE)). Its voice stack is
+  [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32), MIT, © 2025 Shenzhen
+  Xinzhi Future Technology Co., Ltd.
+  ([`firmware/xiaozhi-esp32/LICENSE`](firmware/xiaozhi-esp32/LICENSE)).
+- **Everything else** (the voice server and the rest of Seren's own code) is
+  AGPL-3.0-or-later, like the rest of the Seren family ([`LICENSE`](LICENSE)).
