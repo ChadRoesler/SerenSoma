@@ -58,7 +58,7 @@ private:
             // 【动作 1：眼神游离】双眼协同移动一个小范围
             int offsetX = Random::getInstance().getInt(-20, 20);
             int offsetY = Random::getInstance().getInt(-15, 15);
-            // Wren's right eye (screen left) leads, the dominant one; the other follows a beat later,
+            // the right eye (screen left) leads, the way a dominant eye does; the other follows a beat later,
             // because two eyes landing on the same frame looks mechanical
             avatar.leftEye().setPosition({offsetX, offsetY});
             follow(avatar, {offsetX, offsetY});

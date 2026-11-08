@@ -14,14 +14,16 @@
 # in quotes if it has " #" in it.
 #
 # Check it took: GET http://<robot>:8080/api/status shows "config": where the
-# token and voice server came from ("card" or "build"), never what they are.
+# token and voice server came from ("saved" or "build"), never what they are.
+# A robot already on the network can be given the same keys by seren-soma
+# instead (POST /api/config), with no card.
 
 wifi:
   ssid: MyNetwork
   password: "hunter2"          # blank for an open network
 
 # The box running seren-soma. A bare host gets :7480 and /ota/ added.
-voice: 192.168.0.200
+voice: 192.0.2.10
 
 # What the control API (port 8080) asks for in X-StackChan-Token. Put the same
 # one in the voice server's state folder as control_token. No token anywhere

@@ -66,7 +66,7 @@ class Pointer:
 
 @dataclass
 class RobotConfig:
-    url: str = "http://192.168.0.201:8080"
+    url: str = ""        # the robot's control API, e.g. http://192.0.2.21:8080 (its screen shows the address)
     auth: Pointer = field(default_factory=Pointer)       # its control token; default <state>/control_token
     # Who /ota/ answers. Empty: the robot's own address, looked up from url at startup.
     device_from: List[str] = field(default_factory=list)
@@ -76,7 +76,7 @@ class RobotConfig:
 class LodestarConfig:
     url: str = ""                                        # blank: from symposium_yaml
     auth: Pointer = field(default_factory=Pointer)
-    symposium_yaml: str = "~/seren/wren/apps/symposium/seren-symposium.yaml"
+    symposium_yaml: str = ""                             # a Symposium config to read Lodestar's url and bearer from
 
 
 @dataclass
@@ -84,9 +84,10 @@ class SomaConfig:
     server: ServerConfig = field(default_factory=lambda: ServerConfig(host=DEFAULT_HOST, port=DEFAULT_PORT))
     state_dir: str = "~/seren-soma/state"
     advertise: str = ""        # this box as the robot reaches it; blank: worked out at startup
-    voice: str = "wren"        # the voice Lodestar speaks in
+    voice: str = ""            # the voice Lodestar speaks in; blank: Lodestar's own default
     idle_close_seconds: float = 60.0
     updates: bool = True       # "is there a newer seren-soma", checked against PyPI
+    firmware_repo: str = "ChadRoesler/SerenSoma"   # where fw-v* releases come from (GitHub owner/repo)
     robot: RobotConfig = field(default_factory=RobotConfig)
     lodestar: LodestarConfig = field(default_factory=LodestarConfig)
 
@@ -104,6 +105,9 @@ class SomaConfig:
             # the default: a token of its own in the state folder, made the first time
             api = token_file("token")
             self.server.bearer_token = api
+        if not self.robot.url:
+            raise SystemExit("[seren-soma] robot.url isn't set: the robot's control API, like "
+                             "http://192.0.2.21:8080 (the robot's screen shows its address)")
         robot_host = urlparse(self.robot.url).hostname or ""
         device_from = set(self.robot.device_from)
         if not device_from and robot_host:
@@ -113,6 +117,9 @@ class SomaConfig:
                 diag(f"[seren-soma] can't look up the robot's address {robot_host}; the check-in will answer anyone")
         if self.lodestar.url:
             lodestar_url, lodestar_token = self.lodestar.url, self.lodestar.auth.resolve()
+        elif not self.lodestar.symposium_yaml:
+            raise SystemExit("[seren-soma] no Lodestar: set lodestar.url (and its token), or lodestar.symposium_yaml "
+                             "to read them from a Symposium config")
         else:
             lodestar_url, lodestar_token = lodestar_from_symposium(Path(os.path.expanduser(self.lodestar.symposium_yaml)))
         return Namespace(
@@ -120,14 +127,27 @@ class SomaConfig:
             voice=self.voice, device=robot_host, updates=self.updates, robot_url=self.robot.url, idle_close=self.idle_close_seconds,
             api_token=api, device_token=token_file("device_token"),
             robot_token=self.robot.auth.resolve(self.state / "control_token"), device_from=device_from,
+            robot_token_file=_robot_token_file_for(self.robot.auth, self.state),
+            state=self.state, firmware_repo=self.firmware_repo,
             lodestar_url=lodestar_url.rstrip("/"), lodestar_token=lodestar_token)
+
+
+def _robot_token_file_for(auth: "Pointer", state: Path) -> str:
+    """Where the robot's token is written when it's made or rotated here: its token_file, else the
+    state folder's control_token when nothing else names it. "" when it lives somewhere a write
+    can't reach (an env var, a keychain, the config itself)."""
+    if auth.token_file:
+        return os.path.expanduser(auth.token_file)
+    if auth.token or auth.token_env or auth.token_keyring:
+        return ""
+    return str(state / "control_token")
 
 
 def _this_box(toward: str) -> str:
     """The address this box uses to reach the robot, which is the one the robot can reach it on."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect((toward or "192.168.0.1", 9))
+            s.connect((toward or "10.255.255.255", 9))   # no packet is sent: this only picks a route
             return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
@@ -171,6 +191,7 @@ def load_config(path: Optional[str] = None) -> SomaConfig:
     cfg.state_dir = str(d.get("state_dir") or cfg.state_dir)
     cfg.advertise = str(d.get("advertise") or "")
     cfg.voice = str(d.get("voice") or cfg.voice)
+    cfg.firmware_repo = str(d.get("firmware_repo") or cfg.firmware_repo)
     up = d.get("updates")
     cfg.updates = bool(up.get("enabled", True)) if isinstance(up, dict) else (bool(up) if up is not None else True)
     try:

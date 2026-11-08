@@ -1,4 +1,4 @@
-"""Traces taken from Chad's hand on 5 Nov 2026."""
+"""Traces taken from a real hand on 5 Nov 2026."""
 from seren_soma import touch_read as tr
 
 
@@ -124,7 +124,7 @@ def test_a_long_moving_touch_is_a_scratch():
 
 
 def test_scritching_is_a_burst():
-    # Chad's scritches on 7 Nov: quick strokes, pokes and blips, all inside two seconds
+    # Real scritches on 7 Nov: quick strokes, pokes and blips, all inside two seconds
     burst = [{"kind": "stroke", "way": "back_to_front", "ms": 281, "t_ms": 1000},
              {"kind": "poke", "where": "middle", "ms": 171, "t_ms": 1400},
              {"kind": "stroke", "way": "back_to_front", "ms": 230, "t_ms": 1800},
@@ -163,7 +163,7 @@ def test_overwhelm_is_earned():
     o = tr.Overwhelm()
     assert not o.touch(0, 8000, True)
     assert not o.touch(9000, 9700, False) and not o.running
-    # Chad's second run on 7 Nov, on the sensor's clock: unbroken from 400755 to 419723, 19 s
+    # A second run on 7 Nov, on the sensor's clock: unbroken from 400755 to 419723, 19 s
     run = [(400755, 50, "scritch"), (402120, 110, "scritch"), (404837, 410, "scritch"), (405296, 4627, "scritch"),
            (409930, 4705, "scritch"), (415655, 651, "poke"), (416655, 400, "poke"), (417056, 1969, "scritch")]
     o = tr.Overwhelm()

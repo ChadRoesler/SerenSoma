@@ -31,7 +31,8 @@ def _cfg(tmp_path, robot="127.0.0.1"):
 def test_defaults_bind_the_lan_and_keep_state_at_home():
     cfg = load_config("does-not-exist.yaml")
     assert cfg.server.host == "0.0.0.0" and cfg.server.port == 7480
-    assert cfg.state_dir == "~/seren-soma/state" and cfg.robot.url == "http://192.168.0.201:8080"
+    assert cfg.state_dir == "~/seren-soma/state" and cfg.robot.url == "" and cfg.voice == ""
+    assert cfg.lodestar.symposium_yaml == ""     # nothing of anyone's in the defaults
 
 
 def test_runtime_makes_two_different_tokens(tmp_path):
@@ -50,8 +51,8 @@ def test_the_robot_token_defaults_to_the_state_folder(tmp_path):
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "control_token").write_text("from-state\n", encoding="utf-8")
     y = tmp_path / "s.yaml"
-    y.write_text(f"state_dir: {str(tmp_path / 'state').replace(chr(92), '/')}\nlodestar:\n  url: http://l:1\n  token: t\n",
-                 encoding="utf-8")
+    y.write_text(f"state_dir: {str(tmp_path / 'state').replace(chr(92), '/')}\nrobot:\n  url: http://127.0.0.1:8080\n"
+                 "lodestar:\n  url: http://l:1\n  token: t\n", encoding="utf-8")
     assert load_config(str(y)).runtime().robot_token == "from-state"
 
 
@@ -125,3 +126,79 @@ def test_page_and_health_are_public_logs_are_not(tmp_path):
     assert logs_no == 401
     assert logs["lines"] == ["a INFO heard (2.0s): [said 3 words]", "b INFO night: on"]
     assert "private" not in json.dumps(logs)
+
+
+def test_no_robot_or_no_lodestar_is_said_at_startup(tmp_path):
+    state = str(tmp_path / "state").replace(chr(92), "/")
+    no_robot = tmp_path / "a.yaml"
+    no_robot.write_text(f"state_dir: {state}\nlodestar:\n  url: http://l:1\n  token: t\n", encoding="utf-8")
+    no_lode = tmp_path / "b.yaml"
+    no_lode.write_text(f"state_dir: {state}\nrobot:\n  url: http://127.0.0.1:8080\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="robot.url"):
+        load_config(str(no_robot)).runtime()
+    with pytest.raises(SystemExit, match="lodestar.url"):
+        load_config(str(no_lode)).runtime()
+
+
+def test_overwhelm_is_off_and_nameless_until_set_up():
+    d = voice.DEFAULT_SETTINGS["overwhelm"]
+    assert d["enabled"] is False and d["pose"] == d["after"] == d["clip"] == ""
+    ok = voice.merge_settings(voice.DEFAULT_SETTINGS, {"overwhelm": {"enabled": True, "pose": "flustered",
+                                                                    "after": "melt-2", "clip": "gasp_1"}})
+    assert ok["overwhelm"]["pose"] == "flustered" and ok["overwhelm"]["clip"] == "gasp_1"
+    for bad in ("../x", "a b", "x" * 33):
+        with pytest.raises(ValueError, match="is a name"):
+            voice.merge_settings(voice.DEFAULT_SETTINGS, {"overwhelm": {"clip": bad}})
+
+
+def test_overwhelm_shows_the_poses_its_settings_name(tmp_path, monkeypatch):
+    from aiohttp import web as aweb
+    posted = []
+
+    async def emotion(request):
+        posted.append(await request.json())
+        return aweb.json_response({"ok": True})
+
+    async def leds(request):
+        return aweb.json_response({"ok": True})
+
+    real_sleep = asyncio.sleep
+
+    async def no_wait(*_):
+        await real_sleep(0)
+
+    async def go():
+        robot = aweb.Application()
+        robot.router.add_post("/api/emotion", emotion)
+        robot.router.add_post("/api/leds", leds)
+        async with TestServer(robot) as rs:
+            link = voice.Link(_cfg(tmp_path).runtime())
+            async with TestClient(TestServer(voice.make_app(link))):
+                link.settings["overwhelm"].update(pose="flustered", after="", clip="")
+                monkeypatch.setattr(voice.asyncio, "sleep", no_wait)
+                await link.overwhelm(str(rs.make_url("/api")).rstrip("/"), {})
+                monkeypatch.setattr(voice.asyncio, "sleep", real_sleep)
+    asyncio.run(go())
+    assert posted == [{"name": "flustered", "rest": True}, {"name": "neutral"}]
+
+
+def test_a_blank_voice_is_left_to_lodestar(tmp_path):
+    from aiohttp import web as aweb
+    bodies = []
+
+    async def speak(request):
+        bodies.append(await request.json())
+        return aweb.Response(body=b"RIFF")
+
+    async def go():
+        lode = aweb.Application()
+        lode.router.add_post("/api/v1/speak", speak)
+        async with TestServer(lode) as ls:
+            cfg = _cfg(tmp_path)
+            cfg.lodestar.url = str(ls.make_url("")).rstrip("/")
+            link = voice.Link(cfg.runtime())
+            async with TestClient(TestServer(voice.make_app(link))):
+                await link.speak_wav("hi", "")
+                await link.speak_wav("hi", "alto")
+    asyncio.run(go())
+    assert "voice" not in bodies[0] and bodies[1]["voice"] == "alto"

@@ -80,6 +80,7 @@ static const std::string_view _tag = "HAL-Control";
 #include <apps/common/common.h>
 #include <cstring>
 #include <string>
+#include <vector>
 
 using namespace stackchan;
 
@@ -890,24 +891,64 @@ esp_err_t handle_wake(httpd_req_t* req)
     return send_json(req, root);
 }
 
-esp_err_t handle_reboot(httpd_req_t* req)
+// A moment later, so the answer gets out first.
+bool schedule_reboot()
 {
-    if (!token_ok(req)) {
-        return send_error(req, "401 Unauthorized", "bad or missing token");
-    }
-    // a moment later, so the answer gets out first
     static esp_timer_handle_t timer = nullptr;
     if (timer == nullptr) {
         esp_timer_create_args_t args = {};
         args.callback                = [](void*) { esp_restart(); };
         args.name                    = "reboot";
         if (esp_timer_create(&args, &timer) != ESP_OK) {
-            return send_error(req, "500 Internal Server Error", "could not schedule it");
+            return false;
         }
     }
-    esp_timer_start_once(timer, 500 * 1000);
+    esp_timer_stop(timer);  // a second ask restarts the countdown rather than failing
+    return esp_timer_start_once(timer, 500 * 1000) == ESP_OK;
+}
+
+esp_err_t handle_reboot(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    if (!schedule_reboot()) {
+        return send_error(req, "500 Internal Server Error", "could not schedule it");
+    }
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
+/**
+ * soma.yaml over the network: what seren-soma uses to set up a robot that is
+ * already on Wi-Fi. Same keys, same rules (see soma_config.h). Answers with the
+ * names of what was saved, never the values. Everything here is read at boot,
+ * so "reboot": true is how it takes effect; a new token is only asked for after.
+ */
+esp_err_t handle_config(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body = read_body(req);
+    if (!cJSON_IsObject(body)) {
+        cJSON_Delete(body);
+        return send_error(req, "400 Bad Request", "expected a JSON object of soma.yaml keys");
+    }
+    std::vector<std::string> changed;
+    soma_config::apply_json(body, changed);
+    const bool reboot = cJSON_IsTrue(cJSON_GetObjectItem(body, "reboot"));
+    cJSON_Delete(body);
+
+    cJSON* root  = cJSON_CreateObject();
+    cJSON* names = cJSON_AddArrayToObject(root, "changed");
+    for (const auto& name : changed) {
+        cJSON_AddItemToArray(names, cJSON_CreateString(name.c_str()));
+    }
+    const bool rebooting = reboot && schedule_reboot();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "rebooting", rebooting);
     return send_json(req, root);
 }
 
@@ -973,7 +1014,7 @@ void start_httpd()
     config.ctrl_port        = CONFIG_STACKCHAN_CONTROL_PORT + 1;
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 20;  // the default of 8 is full, and past it a route fails to register
+    config.max_uri_handlers = 24;  // 20 routes; past the cap a route silently fails to register
 #ifdef CONFIG_STACKCHAN_CAMERA
     config.stack_size = 8192;  // the JPEG encoder runs on this task
 #else
@@ -1036,6 +1077,7 @@ void start_httpd()
         {"/api/reboot", HTTP_POST, handle_reboot, nullptr},
         {"/api/wake", HTTP_POST, handle_wake, nullptr},
         {"/api/settings", HTTP_POST, handle_settings, nullptr},
+        {"/api/config", HTTP_POST, handle_config, nullptr},
     };
     for (const auto& route : routes) {
         httpd_register_uri_handler(_server, &route);

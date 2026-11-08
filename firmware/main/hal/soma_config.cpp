@@ -12,6 +12,7 @@
 #include <settings.h>
 #include <ssid_manager.h>
 #include <esp_log.h>
+#include <cJSON.h>
 #include <sdkconfig.h>
 #include <algorithm>
 #include <cctype>
@@ -249,8 +250,13 @@ void save_secret(Value_t& v, const char* nvs_key, const char* name)
     }
 }
 
-void apply(Card_t& card)
+void apply(Card_t& card, std::vector<std::string>* changed = nullptr)
 {
+    auto note = [&](const char* name) {
+        if (changed != nullptr) {
+            changed->emplace_back(name);
+        }
+    };
     if (card.ssid.present) {
         if (card.ssid.text.empty()) {
             ESP_LOGW(kTag, "wifi.ssid is empty, keeping the saved networks");
@@ -260,6 +266,7 @@ void apply(Card_t& card)
             manager.Clear();
             manager.AddSsid(card.ssid.text, card.password.text);
             ESP_LOGI(kTag, "Wi-Fi is now %s", card.ssid.text.c_str());
+            note("wifi");
         }
     } else if (card.password.present) {
         ESP_LOGW(kTag, "wifi.password without wifi.ssid, ignoring it");
@@ -276,14 +283,17 @@ void apply(Card_t& card)
             settings.SetString("ota_url", url);
             ESP_LOGI(kTag, "voice server is now %s", url.c_str());
         }
+        note("voice");
     }
 
     if (card.token.present && fits(card.token, kMaxToken, "token")) {
         save_secret(card.token, "token", "control token");
+        note("token");
     }
 
     if (card.ts_key.present && fits(card.ts_key, kMaxTsKey, "tailnet.key")) {
         save_secret(card.ts_key, "ts_key", "tailnet key");
+        note("tailnet.key");
     }
     if (card.ts_name.present && fits(card.ts_name, kMaxTsName, "tailnet.name")) {
         Settings settings(kNs, true);
@@ -293,9 +303,28 @@ void apply(Card_t& card)
             settings.SetString("ts_name", card.ts_name.text);
         }
         ESP_LOGI(kTag, "tailnet name is now %s", card.ts_name.text.empty() ? kBuildTsName : card.ts_name.text.c_str());
+        note("tailnet.name");
     }
     if (!kHasTailnet && (card.ts_key.present || card.ts_name.present)) {
         ESP_LOGW(kTag, "tailnet settings saved, but this build has no tailnet; they wait for one that does");
+    }
+}
+
+void wipe_card(Card_t& card)
+{
+    for (Value_t* v : {&card.ssid, &card.password, &card.voice, &card.token, &card.ts_key, &card.ts_name}) {
+        wipe(v->text);
+    }
+}
+
+void take(const cJSON* from, const char* key, Value_t& into)
+{
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(from, key);
+    if (cJSON_IsString(item) && item->valuestring != nullptr) {
+        into.present = true;
+        into.text    = item->valuestring;
+    } else if (item != nullptr) {
+        ESP_LOGW(kTag, "/api/config: %s is not a string, ignoring it", key);
     }
 }
 
@@ -329,15 +358,32 @@ void soma_config::apply_card_file()
     fclose(f);
     apply(card);
 
-    for (Value_t* v : {&card.ssid, &card.password, &card.voice, &card.token, &card.ts_key, &card.ts_name}) {
-        wipe(v->text);
-    }
+    wipe_card(card);
 
     // Deleted even if some lines were ignored: the log says which, the file is
     // still on the machine it was written on, and secrets left on a card are worse.
     if (std::remove(path) != 0) {
         ESP_LOGW(kTag, "could not delete %s: its secrets are still on the card", path);
     }
+}
+
+void soma_config::apply_json(const cJSON* body, std::vector<std::string>& changed)
+{
+    Card_t card;
+    take(body, "voice", card.voice);
+    take(body, "token", card.token);
+    const cJSON* wifi = cJSON_GetObjectItemCaseSensitive(body, "wifi");
+    if (cJSON_IsObject(wifi)) {
+        take(wifi, "ssid", card.ssid);
+        take(wifi, "password", card.password);
+    }
+    const cJSON* tailnet = cJSON_GetObjectItemCaseSensitive(body, "tailnet");
+    if (cJSON_IsObject(tailnet)) {
+        take(tailnet, "key", card.ts_key);
+        take(tailnet, "name", card.ts_name);
+    }
+    apply(card, &changed);
+    wipe_card(card);
 }
 
 const std::string& soma_config::control_token()
@@ -353,7 +399,7 @@ const std::string& soma_config::control_token()
 const char* soma_config::control_token_source()
 {
     if (!saved("token").empty()) {
-        return "card";
+        return "saved";
     }
     return std::strlen(kBuildToken) > 0 ? "build" : "none";
 }
@@ -361,7 +407,7 @@ const char* soma_config::control_token_source()
 const char* soma_config::voice_source()
 {
     Settings settings("wifi", false);
-    return settings.GetString("ota_url").empty() ? "build" : "card";
+    return settings.GetString("ota_url").empty() ? "build" : "saved";
 }
 
 std::string soma_config::tailnet_key()

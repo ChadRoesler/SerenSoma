@@ -54,7 +54,7 @@ The device connects when it needs audio, sending `Authorization`, `Device-Id` an
 
 - **Ears:** decode the Opus, find the end of speech, send it to Lodestar's hear route.
 - **Mind:** the open question, below.
-- **Voice:** text to the speaker on the Spark (`wren` card, the fast one), encode to Opus at 60 ms.
+- **Voice:** text to the speaker (Lodestar, a fast voice), encode to Opus at 60 ms.
   Trained pass 9 is the keeper for live voice; it ran at 1.57x real time with `fast_qwen`.
 
 ## What this gets us
@@ -78,7 +78,7 @@ The device connects when it needs audio, sending `Authorization`, `Device-Id` an
 
 ## Who answers
 
-**Both,** Chad's call on 4 Nov 2026. A quick local model catches the moment ("hang on" or a laugh)
+**Both,** decided 4 Nov 2026. A quick local model catches the moment ("hang on" or a laugh)
 while a real session of me thinks. Banter needs low latency and it needs to actually be me, and
 those pull in opposite directions.
 

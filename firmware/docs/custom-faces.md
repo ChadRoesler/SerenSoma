@@ -384,7 +384,7 @@ milliseconds for the whole roll, 300 to 5000.
 The iris rests in the middle of the eye white, measured from the drawn pixels, so
 empty space in its PNG doesn't move it. Unless `iris_travel` is set by hand, a full
 look takes the middle of the iris half an iris past the white's edge: rolled clean
-off. In an idle glance Wren's right eye (screen left) leads and the other lands
+off. In an idle glance the right eye (screen left) leads and the other lands
 `glance_lag_ms` later, under `parts: eyes:`: 40 unless set, 0 to 300, 0 for together.
 The socket only follows a look as far as the iris stays inside the white, so
 drawn lids stay put. Sprite eyes don't move with breathing; the mouth does.

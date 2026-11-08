@@ -34,7 +34,7 @@ STATE = Path.home() / "seren-soma" / "state"
 HEARD_DIR = STATE / "heard"
 HEARD_LOG = STATE / "heard.jsonl"
 TOUCH_LOG = STATE / "touch.jsonl"
-CLIPS = STATE / "clips"     # saved sounds, played as they are: ahegao.wav is the one overwhelm plays
+CLIPS = STATE / "clips"     # saved sounds, played as they are: overwhelm.clip names one
 SETTINGS = STATE / "settings.json"
 SERVICE_LOG = STATE / "seren-soma.log"
 
@@ -49,7 +49,10 @@ def use_state(folder: Path) -> None:
 DEFAULT_SETTINGS = {
     "night": {"enabled": False, "start": "22:30", "end": "07:00", "dimmer": 15, "volume": 30, "brightness": 20},
     "work_hours": {"days": [0, 1, 2, 3, 4], "start": 8, "end": 17},
-    "overwhelm": {"enabled": True, "seconds": 15, "gap_seconds": 3, "rest_seconds": 120},
+    # Off until it's set up: pose is the face it tips into (and rests in through the clip), after the one
+    # it settles through, clip a sound in <state>/clips. All three are names from your own face and clips.
+    "overwhelm": {"enabled": False, "seconds": 15, "gap_seconds": 3, "rest_seconds": 120,
+                  "pose": "", "after": "", "clip": ""},
 }
 
 
@@ -85,6 +88,9 @@ def merge_settings(current, change):
                     raise ValueError(f"{section}.{k} is 0 to 100")
                 if section == "work_hours" and v > 24:
                     raise ValueError(f"{section}.{k} is an hour, 0 to 24")
+            elif isinstance(want, str) and section == "overwhelm":
+                if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_-]{0,32}", v):
+                    raise ValueError(f"{section}.{k} is a name: letters, digits, - and _ (blank for none)")
             elif isinstance(want, str):
                 if not isinstance(v, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
                     raise ValueError(f"{section}.{k} is a time like 22:30")
@@ -99,7 +105,7 @@ OUT_RATE = 24000      # what we send it
 FRAME_MS = 60
 
 LIVE_S = 180          # words this recent mean a call back is a reply, not me barging in
-REPLY_WINDOW_S = 10   # how long a call back stays open for his answer
+REPLY_WINDOW_S = 10   # how long a call back stays open for an answer
 SPEECH_RMS = 500      # 16-bit RMS above this is speech; tune against a real room
 END_SILENCE_MS = 900  # this much quiet after speech ends an utterance
 MIN_SPEECH_MS = 300   # shorter than this was a noise
@@ -268,13 +274,14 @@ class Link:
         self.http: ClientSession | None = None
         self.say_lock = asyncio.Lock()
         self.saying = 0      # replies being rendered or spoken: the channel stays up for them
-        self.last_heard = 0.0  # when Chad last said real words: within LIVE_S, we're mid-conversation
+        self.last_heard = 0.0  # when someone last said real words: within LIVE_S, we're mid-conversation
         self.waking = False
         self.settings = load_settings()
         self.feed = []              # recent touches for the console: what the hand did, what it was read as, what showed
         self.feed_seq = 0
         self.overwhelm_state = {"running": False, "progress": 0.0}
         self.night_now = None       # what was last sent: True, False, or None before the first look
+        self.firmware_armed = None  # {"version", "file"}: offered on the next check-in, once
         HEARD_DIR.mkdir(parents=True, exist_ok=True)
 
     def lodestar_headers(self):
@@ -282,7 +289,7 @@ class Link:
 
     async def speak_wav(self, text: str, voice: str) -> bytes:
         async with self.http.post(f"{self.lodestar_url}/api/v1/speak", headers=self.lodestar_headers(),
-                                  json={"text": text, "voice": voice, "holder": "seren-voice"},
+                                  json={"text": text, "holder": "seren-voice", **({"voice": voice} if voice else {})},
                                   timeout=ClientTimeout(total=240)) as r:
             if r.status != 200:
                 raise web.HTTPBadGateway(text=f"speak: {r.status} {(await r.text())[:200]}")
@@ -329,7 +336,7 @@ class Link:
 
     async def wake_device(self):
         """Open the channel from this end. It stays deaf, and hangs up after the line: I can get
-        Chad's attention without the mic listening to a room he didn't open it in."""
+        someone's attention without the mic listening to a room nobody opened it in."""
         headers = self.robot_headers()
         self.waking = True
         try:
@@ -371,7 +378,7 @@ class Link:
                 await self.send(d, {"type": "tts", "state": "start"})
                 if emotion:
                     await self.send(d, {"type": "llm", "emotion": emotion, "text": ""})
-                # no text: spoken out loud, the words need no bubble, and Chad's art gets the screen
+                # no text: spoken out loud, the words need no bubble, and the face gets the screen
                 await self.send(d, {"type": "tts", "state": "sentence_start"})
                 started = time.monotonic()
                 for i, packet in enumerate(packets):
@@ -392,7 +399,7 @@ class Link:
                 d.reset()
             if woke or d.deaf:
                 if time.monotonic() - self.last_heard < LIVE_S:
-                    # he's talking to me: stay for his answer, then the usual hang-up applies
+                    # he's talking to me: stay for an answer, then the usual hang-up applies
                     d.deaf = False
                     d.last_words = time.monotonic() - max(0, self.args.idle_close - REPLY_WINDOW_S)
                 else:
@@ -403,7 +410,232 @@ class Link:
     # -- routes ---------------------------------------------------------------------------
 
     def robot_headers(self) -> dict:
-        return {"X-StackChan-Token": self.robot_token} if self.robot_token else {}
+        """One dict for the life of the server, refilled on every call: the loops that took it once at
+        start (touch, night) see a rotated token without being restarted."""
+        h = self.__dict__.setdefault("_robot_headers", {})
+        h.clear()
+        if self.robot_token:
+            h["X-StackChan-Token"] = self.robot_token
+        return h
+
+    # -- setting the robot up (robot_setup.py) ----------------------------------------------------
+
+    def robot_token_path(self) -> Path | None:
+        """The file the robot's token lives in here, if it's a file: where a new one gets written."""
+        p = getattr(self.args, "robot_token_file", "")
+        return Path(p) if p else None
+
+    async def _setup_body(self, request):
+        from . import robot_setup as rs
+        self.authorized(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise web.HTTPBadRequest(text="expected a JSON object")
+        try:
+            keys = rs.keys_from(body, advertise=self.args.advertise, port=self.args.port)
+        except rs.SetupError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        return rs, body, keys
+
+    def _token_nowhere(self):
+        return web.HTTPConflict(text="the robot's token here comes from an env var, a keychain or the config itself, not "
+                                     "a file, so a new one has nowhere to be written down. Point robot.token_file at a "
+                                     "file, or leave the robot's token unset to use <state>/control_token.")
+
+    async def robot_config(self, request):
+        """POST /robot/config: set up a robot that's on the network, through its /api/config.
+        Body: soma.yaml's keys (voice defaults to this box), plus "rotate_token": true for a new token
+        and "reboot" (default true; always, with a new token). Answers with the names of what the robot
+        saved, never values. Wi-Fi passwords pass through and are not kept or logged."""
+        rs, body, keys = await self._setup_body(request)
+        new = None
+        path = self.robot_token_path()
+        if body.get("rotate_token"):
+            if path is None:
+                raise self._token_nowhere()
+            new = rs.new_token()
+            keys["token"] = new
+        reboot = bool(body.get("reboot", True)) or new is not None
+        url = f"{self.args.robot_url.rstrip('/')}/api/config"
+        try:
+            async with self.http.post(url, headers=dict(self.robot_headers()), json={**keys, "reboot": reboot},
+                                      timeout=ClientTimeout(total=8)) as r:
+                text = await r.text()
+                if r.status == 404:
+                    raise web.HTTPBadGateway(text="this robot's firmware has no /api/config yet: update it, or use a "
+                                                  "soma.yaml card")
+                if r.status != 200:
+                    raise web.HTTPBadGateway(text=f"the robot said {r.status}: {text[:200]}")
+                answer = json.loads(text)
+        except web.HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise web.HTTPBadGateway(text=f"couldn't reach the robot at {self.args.robot_url}: {e}")
+        changed = [str(c) for c in answer.get("changed", [])]
+        rebooting = bool(answer.get("rebooting"))
+        if new is not None:
+            if "token" not in changed:
+                raise web.HTTPBadGateway(text="the robot didn't save the new token, so nothing changed here")
+            # The robot has it (in NVS, used from its next boot), so this box writes it down now.
+            rs.write_token(path, new)
+            self.robot_token = new
+            self.robot_headers()
+            log.info("robot token rotated; the old one is kept as %s.previous", path.name)
+            if not rebooting:
+                log.warning("the robot saved a new token but didn't reboot onto it: reboot it by hand")
+        log.info("robot set up over the network: %s%s", ", ".join(changed) or "nothing changed",
+                 ", rebooting" if rebooting else "")
+        return web.json_response({"ok": True, "changed": changed, "rebooting": rebooting,
+                                  "token_rotated": new is not None,
+                                  "also": ("anything else holding the old robot token (a Workbench, a Psycheion) "
+                                           "needs it again" if new is not None else None)})
+
+    # -- firmware for the robot (firmware.py) ----------------------------------------------------
+
+    def _fw_state(self) -> Path:
+        return Path(getattr(self.args, "state", STATE))
+
+    async def _robot_firmware(self) -> str | None:
+        try:
+            async with self.http.get(f"{self.args.robot_url.rstrip('/')}/api/status", headers=dict(self.robot_headers()),
+                                     timeout=ClientTimeout(total=4)) as r:
+                return (await r.json(content_type=None)).get("firmware") if r.status == 200 else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def firmware_get(self, request):
+        """GET /firmware: what the robot runs, what's staged here, what's armed."""
+        from . import firmware as fw
+        self.authorized(request)
+        return web.json_response({
+            "robot": await self._robot_firmware(),
+            "staged": [vars(s) for s in fw.staged(self._fw_state())],
+            "armed": self.firmware_armed,
+            "repo": getattr(self.args, "firmware_repo", ""),
+        })
+
+    async def firmware_fetch(self, request):
+        """POST /firmware/fetch {"version": "latest" | "0.1.1"}: the release's update zip, checked
+        against its SHA256SUMS, its app image staged here."""
+        from . import firmware as fw
+        self.authorized(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        want = str((body or {}).get("version") or "latest")
+        repo = getattr(self.args, "firmware_repo", "")
+        gh = {"Accept": "application/vnd.github+json", "User-Agent": "seren-soma"}
+        try:
+            async with self.http.get(f"https://api.github.com/repos/{repo}/releases?per_page=30", headers=gh,
+                                     timeout=ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    raise fw.FirmwareError(f"GitHub said {r.status} for {repo}'s releases")
+                release = fw.pick_release(await r.json(), want)
+            fetched = {}
+            for name in (fw.UPDATE_ZIP.format(v=release["tag_name"][4:]), "SHA256SUMS"):
+                async with self.http.get(fw.asset_url(release, name), headers={"User-Agent": "seren-soma"},
+                                         timeout=ClientTimeout(total=120)) as r:
+                    if r.status != 200:
+                        raise fw.FirmwareError(f"downloading {name} answered {r.status}")
+                    fetched[name] = await r.read()
+            zip_name = fw.UPDATE_ZIP.format(v=release["tag_name"][4:])
+            app = fw.verified_app(release, fetched[zip_name], fetched["SHA256SUMS"].decode("utf-8", "replace"))
+            entry = fw.stage_bytes(self._fw_state(), release["tag_name"], app, f"release {release['tag_name']}")
+        except fw.FirmwareError as e:
+            raise web.HTTPBadGateway(text=str(e))
+        except web.HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise web.HTTPBadGateway(text=f"couldn't fetch the release: {e}")
+        log.info("staged firmware %s from %s (%d bytes, checked)", entry.version, entry.source, entry.size)
+        return web.json_response(vars(entry))
+
+    async def firmware_upload(self, request):
+        """PUT /firmware/upload?version=0.2.0-mine: an app image of your own (stack-chan.bin from a build)."""
+        from . import firmware as fw
+        self.authorized(request)
+        version = request.query.get("version", "")
+        data = await request.read()
+        try:
+            entry = fw.stage_bytes(self._fw_state(), version, data, "uploaded")
+        except fw.FirmwareError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        log.info("staged firmware %s, uploaded (%d bytes)", entry.version, entry.size)
+        return web.json_response(vars(entry))
+
+    async def firmware_install(self, request):
+        """POST /firmware/install {"version", "reboot": true}: arm a staged image for the next check-in,
+        and reboot the robot so that's now. The robot shows its progress and reboots into it; if it
+        can't check in from the new one, the bootloader goes back to this one."""
+        from . import firmware as fw
+        self.authorized(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise web.HTTPBadRequest(text="expected {\"version\": ...}")
+        try:
+            entry = fw.find(self._fw_state(), str(body.get("version") or ""))
+        except fw.FirmwareError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        if entry is None:
+            raise web.HTTPNotFound(text="that version isn't staged here; fetch or upload it first")
+        self.firmware_armed = {"version": entry.version, "file": entry.file}
+        rebooting = False
+        if body.get("reboot", True):
+            try:
+                async with self.http.post(f"{self.args.robot_url.rstrip('/')}/api/reboot", headers=dict(self.robot_headers()),
+                                          json={}, timeout=ClientTimeout(total=6)) as r:
+                    rebooting = r.status == 200
+            except Exception as e:  # noqa: BLE001
+                log.warning("couldn't reboot the robot for the firmware: %s", e)
+        log.info("firmware %s armed%s", entry.version, ", robot rebooting to take it" if rebooting else "")
+        return web.json_response({"ok": True, "armed": self.firmware_armed, "rebooting": rebooting})
+
+    async def firmware_disarm(self, request):
+        self.authorized(request)
+        self.firmware_armed = None
+        return web.json_response({"ok": True, "armed": None})
+
+    async def firmware_image(self, request):
+        """GET /firmware/image/<file>: the image itself, to the robot only (like the check-in)."""
+        from . import firmware as fw
+        if self.args.device_from and request.remote not in self.args.device_from:
+            log.warning("firmware download from %s refused: only %s get it", request.remote,
+                        ", ".join(sorted(self.args.device_from)))
+            raise web.HTTPForbidden(text="not this body's robot")
+        name = request.match_info["file"]
+        entry = next((s for s in fw.staged(self._fw_state()) if s.file == name), None)
+        if entry is None:
+            raise web.HTTPNotFound(text="no such image")
+        log.info("robot downloading firmware %s", entry.version)
+        return web.FileResponse(fw.firmware_dir(self._fw_state()) / entry.file,
+                                headers={"Content-Type": "application/octet-stream"})
+
+    async def robot_card(self, request):
+        """POST /robot/soma.yaml: the card file for a robot that isn't on the network yet, blanks
+        filled: this box as its voice server and the token this box holds for it (made and kept
+        here if there's none). Same body as /robot/config, without rotate_token or reboot."""
+        rs, body, keys = await self._setup_body(request)
+        token = self.robot_token
+        if not token:
+            path = self.robot_token_path()
+            if path is None:
+                raise self._token_nowhere()
+            token = rs.new_token()
+            rs.write_token(path, token)
+            self.robot_token = token
+            self.robot_headers()
+            log.info("made a control token for the robot, kept in %s", path.name)
+        try:
+            text = rs.card_text(keys, token)
+        except rs.SetupError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        log.info("made a soma.yaml for the card (%s)", ", ".join(sorted(keys) + ["token"]))
+        return web.Response(text=text, content_type="text/yaml",
+                            headers={"Content-Disposition": 'attachment; filename="soma.yaml"',
+                                     "Cache-Control": "no-store"})
 
     async def ota(self, request):
         """The check-in. No mqtt, no activation, no firmware: the websocket is all it gets, and only
@@ -413,10 +645,16 @@ class Link:
                         ", ".join(sorted(self.args.device_from)))
             raise web.HTTPForbidden(text="not this body's robot")
         host = self.args.advertise
-        return web.json_response({
+        answer = {
             "websocket": {"url": f"ws://{host}:{self.args.port}/voice", "token": self.device_token, "version": 1},
             "server_time": {"timestamp": int(time.time() * 1000), "timezone_offset": -time.timezone // 60},
-        })
+        }
+        offer, self.firmware_armed = self.firmware_armed, None    # offered once, then disarmed
+        if offer is not None:
+            answer["firmware"] = {"version": offer["version"], "force": 1,
+                                  "url": f"http://{host}:{self.args.port}/firmware/image/{offer['file']}"}
+            log.info("offered firmware %s on the check-in", offer["version"])
+        return web.json_response(answer)
 
     async def voice(self, request):
         auth = request.headers.get("Authorization", "")
@@ -489,14 +727,15 @@ class Link:
         return p.read_bytes()
 
     async def clip_route(self, request):
-        """POST /clip {"name": "ahegao_take2", "emotion": "ahegao"}: play a saved sound, waking the robot for it."""
+        """POST /clip {"name": "hello", "emotion": "happy"}: play a saved sound, waking the robot for it."""
         self.authorized(request)
         body = await request.json()
         seconds = await self.say("", self.args.voice, body.get("emotion"), True, self.clip(body.get("name", "")))
         return web.json_response({"ok": True, "seconds": seconds})
 
     async def overwhelm(self, base, headers):
-        """Tip over: the face, held through the call; a flash on the rails; the clip; then melty, then back."""
+        """Tip over: overwhelm.pose, held through the call; a flash on the rails; overwhelm.clip; then
+        overwhelm.after, then back. Each is skipped when it's blank."""
         async def post(path, body):
             try:
                 async with self.http.post(f"{base}{path}", headers=headers, json=body, timeout=ClientTimeout(total=4)) as r:
@@ -504,20 +743,27 @@ class Link:
             except Exception as e:
                 log.warning("overwhelm %s: %s", path, e)
 
+        o = self.settings["overwhelm"]
         log.info("overwhelmed")
-        await post("/emotion", {"name": "ahegao", "rest": True})   # the voice code's "neutral" means ahegao for now
+        if o.get("pose"):
+            await post("/emotion", {"name": o["pose"], "rest": True})   # resting in it: the clip's "neutral" is it
         for _ in range(2):
             await post("/leds", {"frame": [[168, 0, 110]] * 12})
             await asyncio.sleep(0.15)
             await post("/leds", {"frame": [[0, 0, 0]] * 12})
             await asyncio.sleep(0.1)
-        try:
-            await self.say("", self.args.voice, None, True, self.clip("ahegao"))
-        except Exception as e:
-            log.warning("overwhelm clip: %s", e)
+        played = False
+        if o.get("clip"):
+            try:
+                await self.say("", self.args.voice, None, True, self.clip(o["clip"]))
+                played = True
+            except Exception as e:
+                log.warning("overwhelm clip: %s", e)
+        if not played:
             await asyncio.sleep(3)
-        await post("/emotion", {"name": "melty"})                   # and the resting pose goes with it
-        await asyncio.sleep(5)
+        if o.get("after"):
+            await post("/emotion", {"name": o["after"]})                # and the resting pose goes with it
+            await asyncio.sleep(5)
         await post("/emotion", {"name": "neutral"})
 
     async def watch_night(self):
@@ -629,7 +875,7 @@ class Link:
         recent = []         # the last few head touches, to tell scritching from what each bit looks like
         overwhelm = Overwhelm()
         knobs = None
-        kept_at = 0.0       # when melty was last renewed under a hand that hasn't lifted
+        kept_at = 0.0       # when the scritch face was last renewed under a hand that hasn't lifted
         head = None         # what the face says its head touches show, None if it doesn't
         uptime = None       # the robot's clock, and when it was read
         read_at = 0.0
@@ -695,7 +941,7 @@ class Link:
                 react = reaction_for({"kind": "scritch"}, head)
             if react and react == reaction_for({"kind": "scritch"}, head):
                 kept_at = time.monotonic()
-            # earned, never by accident: not with a call open, not in his work hours, not if it's switched off
+            # earned, never by accident: not with a call open, not in work hours, not if it's switched off
             wh = self.settings["work_hours"]
             tipped = False
             if tip and o["enabled"] and (head or {}).get("scritch") and self.device is None \
@@ -757,6 +1003,14 @@ def make_app(link: "Link", viewer_html: str = "") -> web.Application:
     app.router.add_get("/settings", link.settings_get)
     app.router.add_post("/settings", link.settings_post)
     app.router.add_get("/touch", link.touch_feed)
+    app.router.add_post("/robot/config", link.robot_config)
+    app.router.add_post("/robot/soma.yaml", link.robot_card)
+    app.router.add_get("/firmware", link.firmware_get)
+    app.router.add_post("/firmware/fetch", link.firmware_fetch)
+    app.router.add_put("/firmware/upload", link.firmware_upload)
+    app.router.add_post("/firmware/install", link.firmware_install)
+    app.router.add_post("/firmware/disarm", link.firmware_disarm)
+    app.router.add_get("/firmware/image/{file}", link.firmware_image)
     app.router.add_get("/health", link.health)
     app.router.add_get("/", link.root)
     app.router.add_get("/api/about", link.about)

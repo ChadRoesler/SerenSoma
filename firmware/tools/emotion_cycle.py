@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Walk the device through every emotion, to check a face on the real screen.
 
-    python emotion_cycle.py [--host 192.168.0.201] [--seconds 4] [--face ../../wrenFace/studio/face.yaml]
+    python emotion_cycle.py --host <robot address> [--seconds 4] [--face path/to/face.yaml]
 
 With --face the names come from that face.yaml (PyYAML needed), neutral first;
 without it, the stock list. Each name is shown in the speech bubble too, so what
@@ -42,7 +42,7 @@ def names_from(path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default="192.168.0.201")
+    ap.add_argument("--host", required=True, help="the robot's address (its screen shows it)")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--seconds", type=float, default=4.0)
     ap.add_argument("--face", help="face.yaml to take the emotion names from")

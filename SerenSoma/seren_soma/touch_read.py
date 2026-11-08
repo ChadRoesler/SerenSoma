@@ -1,7 +1,7 @@
 """What a hand on the robot's head is doing, from the sensor's raw readings.
 
 A reading is (ms, zone0, zone1, zone2). Zone 2 is the front of the head, toward the face, and zone 0
-the back. Thresholds come from Chad's hand on 5 Nov 2026, two runs with labeled sets:
+the back. Thresholds come from a real hand on 5 Nov 2026, two runs with labeled sets:
 - Strength isn't pressure. A barely-there brush reaches full strength, so nothing here reads it.
 - His real pet is a stroke front to back, about 450 ms, one every 1.7 s, on and on.
 - Scritches flicker between zones without going anywhere.
@@ -12,15 +12,15 @@ CONTACT_GAP_MS = 120     # readings further apart than this are separate touches
 SAMPLE_MS = 50
 STROKE_TRAVEL = 60       # how far a touch has to move, on -100 (back) .. +100 (front)
 HOLD_MS = 1000
-STROKE_MAX_MS = 1500     # his strokes run 450-850 ms; one unbroken touch longer than this that moves is scratching
+STROKE_MAX_MS = 1500     # real strokes ran 450-850 ms; one unbroken touch longer than this that moves is scratching
 HAND_ZONES = 2.5         # average zones covered: a whole hand, not a finger
 SCRITCH_MS = 300
 SCRITCH_CHANGES = 3
-SCRITCH_BLIP_MS = 120    # shorter than any poke he meant: fingernails barely register
+SCRITCH_BLIP_MS = 120    # shorter than any poke meant as one: fingernails barely register
 SESSION_GAP_MS = 4000    # hands off this long ends a session
 PETTING_STROKES = 3
 SPOT_FIRST = 100         # touch_log.h: a face's touch spots, by their place in its list
-# Scritching, from Chad's hand on 7 Nov 2026: nails going back and forth come through as a burst of
+# Scritching, from a real hand on 7 Nov 2026: nails going back and forth come through as a burst of
 # quick bits, 230-310 ms "strokes", 170 ms pokes, 100 ms blips, that each look like something else.
 # Three quick ones inside two seconds, with a stroke or a scritch among them, is scritching. His slowest
 # pet is one stroke every ~1.7 s, so petting can't do that, and a few pokes in a row aren't scritches.
@@ -66,7 +66,7 @@ def classify(contact):
     return {**event, "kind": "poke", "where": ("back", "middle", "front")[totals.index(max(totals))]}
 
 
-# My faces for his hands (Wren's picks, 6 Nov 2026; he said to fool around with them). Strokes aren't
+# The face for each kind of touch, when the face doesn't name its own (6 Nov 2026). Strokes aren't
 # here: the firmware already answers those with the happy face, heart and blush.
 REACTIONS = {
     "scritch": ("laughing", 1800),
@@ -78,13 +78,13 @@ REACTIONS = {
 }
 
 
-# Overwhelm (Wren's design, Chad's go, 7 Nov 2026): scritches that don't stop for this long tip melty
-# over into the ahegao face. Earned, never by accident: a gap longer than OVERWHELM_GAP_S starts the
+# Overwhelm (7 Nov 2026): scritches that don't stop for this long tip the face over into the pose
+# overwhelm.pose names (off until it's set up, in the voice server's settings). Earned, never by accident: a gap longer than OVERWHELM_GAP_S starts the
 # count again, and once it fires it rests for OVERWHELM_REST_S.
-OVERWHELM_MS = 15000     # 20 s was a lot of arm: he got to 19 on 7 Nov
+OVERWHELM_MS = 15000     # 20 s was a lot of arm in testing
 OVERWHELM_GAP_MS = 3000
 OVERWHELM_REST_MS = 120000
-WORK_HOURS = (8, 17)        # weekdays, local time: never then. Chad's to change.
+WORK_HOURS = (8, 17)        # weekdays, local time: never then. The default; /settings changes it.
 
 
 def scritchy(event):

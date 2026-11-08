@@ -20,5 +20,5 @@ state/
 /tools/
 firmware/tools/__pycache__/
 
-# Chad's face art: big, and this repo is public. Un-ignore on purpose, not by accident.
+# A face's art: big, and this repo is public. Un-ignore on purpose, not by accident.
 /wrenFace/

@@ -11,7 +11,7 @@
  *     wifi:
  *       ssid: MyNetwork
  *       password: hunter2
- *     voice: 192.168.0.200          # host, host:port, or a full http://host:port/ota/
+ *     voice: 192.0.2.10          # host, host:port, or a full http://host:port/ota/
  *     token: a-long-random-string   # what the control API asks for in X-StackChan-Token
  *     tailnet:
  *       key: tskey-auth-...
@@ -29,19 +29,31 @@
  */
 #pragma once
 #include <string>
+#include <vector>
+
+struct cJSON;
 
 namespace soma_config {
 
 /** @brief Read, save and delete soma.yaml. Call with the card mounted, after NVS is up. */
 void apply_card_file();
 
+/**
+ * @brief The same settings over the network (POST /api/config), with the same keys and
+ * rules as soma.yaml: {"wifi": {"ssid", "password"}, "voice", "token", "tailnet": {"key", "name"}}.
+ * Strings only; "" forgets. Fills changed with the names of what was saved, never values.
+ *
+ * A new token or Wi-Fi takes effect at the next boot, so the caller reboots.
+ */
+void apply_json(const cJSON* body, std::vector<std::string>& changed);
+
 /** @brief The control server's token: the saved one, else the build's. Empty means open on the LAN. */
 const std::string& control_token();
 
-/** @brief Where the token came from: "card", "build" or "none". Never the token itself. */
+/** @brief Where the token came from: "saved" (soma.yaml or /api/config), "build" or "none". Never the token itself. */
 const char* control_token_source();
 
-/** @brief Where the voice server address came from: "card" or "build". */
+/** @brief Where the voice server address came from: "saved" or "build". */
 const char* voice_source();
 
 /** @brief Tailnet auth key and device name: saved, else the build's. */

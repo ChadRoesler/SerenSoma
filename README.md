@@ -51,13 +51,15 @@ yours *yours* goes on its microSD card as one file, `soma.yaml`:
 wifi:
   ssid: MyNetwork
   password: "hunter2"
-voice: 192.168.0.200        # the box running seren-soma
+voice: 192.0.2.10        # the box running seren-soma
 token: "long-and-random"    # what the control API asks for
 ```
 
 The robot reads it once at boot, saves it, and **deletes it from the card**, so a password never
 rides around on a card. Every key is optional, an empty one forgets what was saved, and
-`GET /api/status` says where each came from (`"card"` or `"build"`) without saying what it is.
+`GET /api/status` says where each came from (`"saved"` or `"build"`) without saying what it is.
+A robot that's already on the network takes the same keys over `POST /api/config`, which is what
+seren-soma's setup page uses.
 [`firmware/soma.yaml.sample`](firmware/soma.yaml.sample) has all of it. (`wifi.txt`, SSID on the
 first line and password on the second, still works for just the Wi-Fi.)
 
@@ -71,6 +73,7 @@ calls from anything on the network, and says so in its boot log.
 | | |
 |---|---|
 | `GET /api/status` | Uptime, battery, heap, the face, what each LED shows, the settings. |
+| `POST /api/config` | The `soma.yaml` keys over the network (Wi-Fi, voice server, token, tailnet), saved, never echoed back. `reboot: true` to apply them. |
 | `POST /api/settings` | Read, or save, the master light dimmer, speaker volume and screen brightness (all 0 to 100; saved on the robot). `night` puts a cap over them that is never saved. |
 | `POST /api/emotion`, `/api/react` | A pose, or a pose for a moment. `rest: true` makes a pose the one the robot goes back to. |
 | `POST /api/leds`, `/api/led` | Light the rails, per LED or all at once. |
@@ -102,6 +105,9 @@ token for its voice connection, and the check-in only answers the robot's own ad
 | `GET`/`POST /settings` | Night (hours and caps for lights, speaker and screen), work hours, and how long unbroken scratching takes to tip the face over. |
 | `GET /touch` | The live touch feed, for a console. |
 | `GET /api/logs` | The end of its log, what was heard replaced by a word count. |
+| `POST /robot/config` | Set the robot up over the network: Wi-Fi, voice server (blank: this box), tailnet, `rotate_token` for a new token. The robot takes a new token first, then this box writes it down, then the robot reboots onto it. |
+| `POST /robot/soma.yaml` | The same, as a `soma.yaml` for the SD card of a robot that isn't on the network yet, with this box's blanks filled in. |
+| `GET /firmware`, `POST /firmware/fetch`, `PUT /firmware/upload`, `POST /firmware/install` | Firmware for the robot: fetch a `fw-v*` release (checked against its SHA256SUMS) or stage a build of your own, then install it. The robot is offered it once on its next check-in, downloads it from here (only the robot's address can), and reboots into it; one that can't check in afterwards rolls back. |
 
 **Night mode** lives here, not in a console, so the bedroom stays dim with nothing else running. It's
 off until you turn it on.

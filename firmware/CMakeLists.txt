@@ -7,10 +7,16 @@ if(CMAKE_GENERATOR MATCHES "^Ninja")
     set(CMAKE_NINJA_FORCE_RESPONSE_FILE TRUE CACHE INTERNAL "Use Ninja response files")
 endif()
 
-# Deliberately higher than anything upstream ships, until the Xiaozhi OTA check is
-# culled: it installs any version above this one on its own, which replaces the
-# whole firmware with stock. Based on upstream 1.6.2.
-set(PROJECT_VER "99.6.2")
+# The release workflow passes the tag's version (fw-v0.1.1 builds 0.1.1). Your own
+# builds are 0.0.0-dev. This used to be 99.6.2, higher than anything upstream ships,
+# because the check-in went to Xiaozhi's cloud and it installs any newer version it is
+# offered. The check-in is seren-soma now (CONFIG_OTA_URL is blank by default), and
+# seren-soma only offers firmware when asked to, so the real number can be used.
+if(DEFINED ENV{SOMA_FW_VERSION} AND NOT "$ENV{SOMA_FW_VERSION}" STREQUAL "")
+    set(PROJECT_VER "$ENV{SOMA_FW_VERSION}")
+else()
+    set(PROJECT_VER "0.0.0-dev")
+endif()
 add_definitions(-DFIRMWARE_VERSION=\"${PROJECT_VER}\")
 
 # Add this line to disable the specific warning

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Face Studio</title>
-<!-- Face Studio: the StackChan custom skin, drawn and animated in a page (Wren, 2 Nov 2026).
+<!-- Face Studio: the StackChan custom skin, drawn and animated in a page (2 Nov 2026).
      Rendering mirrors firmware/main/stackchan/avatar/skins/custom: eyes.cpp, mouth.cpp,
      custom.cpp, decorator.cpp, face_manifest.cpp; timings from modifiers/*.h. -->
 <style>
@@ -197,7 +197,7 @@ async function api(path, opts) {
 }
 function banner(msg) { const b = $("#banner"); b.textContent = msg; b.style.display = msg ? "block" : "none"; }
 function starterDoc(name) {
-  return { face: { name: name || "Wren", background: "#16120F", mirror_eyes: true, drawn_eye: "right" },
+  return { face: { name: name || "my-face", background: "#16120F", mirror_eyes: true, drawn_eye: "right" },
            parts: { eyes: { socket_size: [64, 52], iris_parallax: 25, right_pos: [52, -18], left_pos: [-52, -18], lids_upper: {}, lids_lower: {} },
                     mouths: { pos: [0, 46], travel: [8, 6], shapes: {} }, brows: { right_pos: [52, -46], left_pos: [-52, -46] }, decorators: {} },
            emotions: {} };
@@ -388,7 +388,7 @@ function tick(now) {
   // IdleExpressionModifier: every 2..6 s: 70% glance, 10% mouth tilt, 20% back to neutral
   if (LIVE.idle && now >= LIVE.nextIdle) {
     const a = rint(0, 100);
-    // Wren's right eye (screen left) leads; the other one catches up the face's glance lag later
+    // the right eye (screen left) leads; the other one catches up the face's glance lag later
     LIVE.idlePrev = LIVE.idleGaze; LIVE.idleLagUntil = now + (DOC ? resolve().glanceLag : 40);
     if (a < 70) { LIVE.idleGaze = [rint(-20, 20), rint(-15, 15)]; LIVE.idleMouth = [0, rint(0, 10)]; }
     else if (a < 80) LIVE.idleRot = rint(-30, 30);
@@ -953,7 +953,7 @@ function buildLeftPanels() {
     num("Clip radius", () => F.radius, v => e.clip_radius = v),
     num("Iris parallax %", () => F.parallax, v => e.iris_parallax = v),
     num("Glance lag (ms)", () => F.glanceLag, v => e.glance_lag_ms = clamp(Math.round(v) || 0, 0, 300), 10),
-    el("div", { class: "muted tiny" }, "In a glance Wren's right eye (screen left) leads and the other lands this much later. 0 moves them together."),
+    el("div", { class: "muted tiny" }, "In a glance the right eye (screen left) leads and the other lands this much later. 0 moves them together."),
     el("label", {}, el("span", {}, "Iris travel"), el("input", { type: "checkbox", checked: !!e.iris_travel,
       onchange: ev => { if (ev.target.checked) e.iris_travel = [...F.travel]; else delete e.iris_travel; dirty(); buildLeft(); } }),
       el("span", { class: "muted tiny" }, e.iris_travel ? "set by hand" : `auto ${F.travel.join(" x ")}`)),

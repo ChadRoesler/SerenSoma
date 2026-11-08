@@ -294,7 +294,7 @@ void StackChanAvatarDisplay::SetupUI()
                     touch_log::add(GetHAL().millis(), none, touch_log::kSpotFirst + spot);
                     return;
                 }
-                // a face from before touch spots: the two Chad's had, until it declares its own
+                // a face from before touch spots: the two the first sprite face had, until it declares its own
                 if (custom->touchDeclared() || !tap) {
                 } else if (at.x >= 135 && at.x <= 205 && at.y >= 105 && at.y <= 155) {
                     custom->react("surprised", 1500);

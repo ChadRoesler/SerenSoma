@@ -20,7 +20,6 @@ Listens on 127.0.0.1 only, and answers only pages from this machine. Reads and
 writes only inside the open folder (Open folder... in the page, or --root); the
 choice is remembered in ~/.face_studio.json. Needs PyYAML (pip install pyyaml). Building for the device is still face.py's job.
 
-Wren, 2 Nov 2026.
 """
 import argparse
 import json
@@ -284,7 +283,7 @@ JOB = {"running": False, "phase": "", "ok": None}
 
 def bot():
     b = settings().get("bot") or {}
-    return (b.get("url") or "http://192.168.0.201:8080").rstrip("/"), b.get("token") or ""
+    return (b.get("url") or "").rstrip("/"), b.get("token") or ""   # set in the page (Robot...)
 
 
 def bot_call(path, body=None, headers=None, timeout=8, method=None):

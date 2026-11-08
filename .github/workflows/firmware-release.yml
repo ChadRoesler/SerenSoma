@@ -58,8 +58,13 @@ jobs:
           done
 
       - name: Build
+        env:
+          # The firmware reports it (/api/status "firmware", the check-in), so seren-soma can
+          # tell a robot is behind. Tags only; anything else is the build's own 0.0.0-dev.
+          SOMA_FW_VERSION: ${{ startsWith(github.ref, 'refs/tags/fw-v') && github.ref_name || '' }}
         run: |
           . "$IDF_PATH/export.sh"
+          export SOMA_FW_VERSION="${SOMA_FW_VERSION#fw-v}"
           idf.py build
 
       - name: The build carries no secrets and no address
