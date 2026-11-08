@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "setuptools-scm>=8", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seren-soma"
+dynamic = ["version"]
+description = "The body's nervous system: a Stack-chan robot's voice, ears and touch, its faces' reactions, night mode and work hours."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [{ name = "Chad Roesler" }]
+readme = "README.md"
+keywords = ["seren", "stackchan", "robot", "voice", "xiaozhi", "aiohttp"]
+dependencies = [
+    "aiohttp>=3.9",
+    # Opus in and out of the robot (libopus is in PyAV's wheels)
+    "av>=12",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    # config blocks, token pointers, the viewer shell, enforce_server
+    "seren-meninges>=6.0.0,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+seren-soma = "seren_soma.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/ChadRoesler/SerenSoma"
+Repository = "https://github.com/ChadRoesler/SerenSoma"
+"Bug Tracker" = "https://github.com/ChadRoesler/SerenSoma/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["seren_soma*"]
+
+[tool.setuptools.package-data]
+seren_soma = ["viewer/ui/*.html", "viewer/ui/*.css", "viewer/ui/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools_scm]
+root = ".."
+version_scheme = "release-branch-semver"
+version_file = "seren_soma/_version.py"
+tag_regex = "^v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+.*)$"
+fallback_version = "0.0.0.dev0"

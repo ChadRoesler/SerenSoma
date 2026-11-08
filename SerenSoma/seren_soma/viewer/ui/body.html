@@ -1,0 +1,23 @@
+<section class="view" id="status">
+  <div class="card">
+    <h3>The body</h3>
+    <div id="facts" class="facts muted">Looking…</div>
+    <p class="muted tiny">To watch it and change how it behaves, use SerenPsycheion. This page is for checking
+      it's alive and, if something's wrong, sending its log to whoever's helping.</p>
+  </div>
+</section>
+
+<section class="view" id="logs">
+  <div class="card">
+    <h3>Log</h3>
+    <div class="row">
+      <button class="btn primary" onclick="copyLogs()">Copy for help</button>
+      <button class="btn" onclick="loadLogs()">Refresh</button>
+      <label class="muted tiny">Last <select id="logLines" onchange="loadLogs()"><option>100</option><option selected>200</option><option>500</option><option>2000</option></select> lines</label>
+      <span id="copyMsg" class="muted tiny"></span>
+    </div>
+    <p class="muted tiny">What you say to it never leaves this page: each thing it heard shows as how many words, and
+      a token as &lt;token&gt;. Paste what you copy anywhere you like.</p>
+    <pre id="logText" class="log">…</pre>
+  </div>
+</section>

@@ -15,9 +15,9 @@ what it keeps, and where it sends things. That comes first.
 
 | | When it's on | What's kept | Where it goes |
 |---|---|---|---|
-| **Microphone** | Only after a tap on the screen, or when the mind calls you. There's no wake word: nothing listens for one. A call the mind starts is deaf, and hangs up when it's done speaking, unless you were talking to it in the last three minutes; then it stays open a few seconds for your answer. Any open channel hangs up after a quiet minute. | Each thing you say, as a WAV under `seren-voice/state/heard/` and its transcript in `heard.jsonl`. Clips with no words in them are deleted. | Transcribed by the speech service your Lodestar points at (`/api/v1/hear`; Whisper on your own box in the reference setup). |
+| **Microphone** | Only after a tap on the screen, or when the mind calls you. There's no wake word: nothing listens for one. A call the mind starts is deaf, and hangs up when it's done speaking, unless you were talking to it in the last three minutes; then it stays open a few seconds for your answer. Any open channel hangs up after a quiet minute. | Each thing you say, as a WAV under the state folder's `heard/` and its transcript in `heard.jsonl`. Clips with no words in them are deleted. | Transcribed by the speech service your Lodestar points at (`/api/v1/hear`; Whisper on your own box in the reference setup). |
 | **Camera** | Only when asked for one picture over the control API. Nothing takes a photo on its own, and the console doesn't have a camera button. | Nothing on the robot. The JPEG goes to whoever asked. | Only to that caller. |
-| **Head touch** (three zones on top) and **screen touch** | Always: they make the face react. | Each touch, what it was read as and which face it brought up, in `seren-voice/state/touch.jsonl`. | Nowhere off the box. |
+| **Head touch** (three zones on top) and **screen touch** | Always: they make the face react. | Each touch, what it was read as and which face it brought up, in the state folder's `touch.jsonl`. | Nowhere off the box. |
 | **Speaker** | When the mind speaks. | Saved sound clips under `state/clips/`, if any. | Speech is rendered by the service your Lodestar points at (`/api/v1/speak`). |
 
 **The lights tell the truth, and nothing can make them lie.** Green on the
@@ -27,14 +27,14 @@ These are held above everything else on the rails: a light show, a mood
 color, an API call, none of them can overwrite them. The master dimmer and
 night mode can make them dimmer, but never off.
 
-Everything in `seren-voice/state/` is git-ignored, tokens included.
+All of it lives in the voice server's state folder, `~/seren-soma/state/` by default, outside this repo. Its page shows the log with what was heard replaced by a word count, so you can send it to someone helping you without sending what you said.
 
 ## What's here
 
 | | |
 |---|---|
 | [`firmware/`](firmware/) | The robot's firmware, ESP-IDF 6.1 on the CoreS3. Sprite faces, the token-guarded control API, the light rails, the head sensor, sending a face over Wi-Fi. [`firmware/docs/custom-faces.md`](firmware/docs/custom-faces.md) is the face format. |
-| [`seren-voice/`](seren-voice/) | The nervous system. Speaks the robot's voice protocol, hears through the speech service, reads the head sensor into strokes, pokes, scritches and resting hands, and turns them into faces. Owns night mode and work hours. |
+| [`SerenSoma/`](SerenSoma/) | `seren-soma`, the nervous system, as a Python package. Speaks the robot's voice protocol, hears through the speech service, reads the head sensor into strokes, pokes, scritches and resting hands, and turns them into faces. Owns night mode and work hours. |
 | `firmware/tools/` | `face.py` (build a face from PNGs) and Face Studio, until they move to SerenPsycheion. |
 
 A mind drives the body through [SerenWorkbench](https://github.com/ChadRoesler/SerenWorkbench)'s
@@ -58,24 +58,34 @@ calls from anything on the network, and says so in its boot log.
 | `POST /api/face`, `/api/face-restore`, `/api/reboot` | Send a face (it goes in on the next boot), or swap back to the one before it. |
 | `GET /api/photo` | One picture, red light first. See above. |
 
-## The voice server (port 7480)
+## The voice server, `seren-soma` (port 7480)
 
 ```
-cd seren-voice
-.venv\Scripts\python.exe seren_voice.py --advertise <this box's address>
+pip install seren-soma
+seren-soma                  # reads ~/seren-soma/seren-soma.yaml
+seren-soma --describe       # one line of JSON, for installers
 ```
 
-It reads Lodestar's address and token from your Symposium config. Its own
-routes take a bearer token from `state/token`:
+It belongs on an always-on box on the robot's network: night mode, touch reactions and the mind's
+voice all live in it. The robot finds it through the check-in address set in its firmware
+(`CONFIG_OTA_URL` in `firmware/sdkconfig.defaults.local`), so moving it means pointing that at the
+new box and flashing once. [`SerenSoma/seren-soma.yaml.sample`](SerenSoma/seren-soma.yaml.sample) has
+every setting.
+
+**Two tokens.** The API token, `token` in the state folder (made the first time, or
+`server.bearer_token_*`), guards everything below and never leaves the box. The robot gets its own
+token for its voice connection, and the check-in only answers the robot's own address.
 
 | | |
 |---|---|
+| `GET /viewer` | Is it alive, and its log, for sending to whoever's helping (no token to open the page; the 🔑 asks for it). |
 | `POST /say` | Speak through the robot (`wake` opens the channel to do it). |
 | `GET`/`POST /settings` | Night (hours and caps for lights, speaker and screen), work hours, and how long unbroken scratching takes to tip the face over. |
 | `GET /touch` | The live touch feed, for a console. |
+| `GET /api/logs` | The end of its log, what was heard replaced by a word count. |
 
-**Night mode** lives here, not in a console, so the bedroom stays dim with
-nothing else running. It's off until you turn it on.
+**Night mode** lives here, not in a console, so the bedroom stays dim with nothing else running. It's
+off until you turn it on.
 
 ## Built on Stack-chan
 

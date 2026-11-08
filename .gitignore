@@ -3,10 +3,18 @@
 # this machine's path and the device's LAN address
 .mcp.json
 
-# the voice server's environment, token and recordings
-seren-voice/.venv/
-seren-voice/state/
-seren-voice/__pycache__/
+# the old voice server's environment, tokens and recordings, before it was the seren-soma package
+seren-voice/
+
+# the seren-soma package
+__pycache__/
+*.egg-info/
+SerenSoma/build/
+SerenSoma/dist/
+SerenSoma/seren_soma/_version.py
+# a local config can hold an inline token; state belongs in ~/seren-soma/state, but never in here
+seren-soma.yaml
+state/
 
 # the workbench at the root only; a bare tools/ also swallowed firmware/tools, which is Face Studio
 /tools/

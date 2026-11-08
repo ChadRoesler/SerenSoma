@@ -1,0 +1,7 @@
+.card h3 { margin:0 0 8px; font-size:14px; letter-spacing:.04em; text-transform:uppercase; color:var(--text-dim); }
+.facts { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; font-size:13px; margin-bottom:10px; }
+.facts b { color:var(--text); font-weight:500; word-break:break-all; }
+.tiny { font-size:12px; }
+.row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:6px 0; }
+pre.log { max-height:60vh; overflow:auto; background:var(--bg-2); border:1px solid var(--border); border-radius:8px;
+  padding:10px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; }

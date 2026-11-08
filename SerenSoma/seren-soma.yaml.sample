@@ -1,0 +1,31 @@
+# ════════════════════════════════════════════════════════════════════════
+#  seren-soma.yaml - copy to ~/seren-soma/seren-soma.yaml
+# ════════════════════════════════════════════════════════════════════════
+
+server:
+  host: 0.0.0.0            # the robot dials in over the LAN
+  port: 7480
+  # The API token. Blank: the file `token` in the state folder, made the first time.
+  # bearer_token_env: SEREN_SOMA_TOKEN
+
+# Tokens, what was heard, touches, settings and the log. Outside any repo.
+state_dir: ~/seren-soma/state
+
+# This box's address as the robot reaches it. Blank: the address this box uses toward the robot.
+# advertise: 192.168.0.10
+
+voice: wren                # the voice Lodestar speaks in
+idle_close_seconds: 60     # an open channel with no words this long hangs up
+
+robot:
+  url: http://192.168.0.201:8080
+  # Its control token (CONFIG_STACKCHAN_CONTROL_TOKEN in the firmware). Blank: the file
+  # `control_token` in the state folder. Or token_env / token_keyring / token_file / token.
+  # The check-in only answers the robot's own address; add others if it reaches you through one:
+  # device_from: [192.168.0.201]
+
+lodestar:
+  # Hearing and speaking. Blank url: read from the Symposium config on this box.
+  # url: http://nuc:6361
+  # token_env: SEREN_LODESTAR_TOKEN
+  symposium_yaml: ~/seren/wren/apps/symposium/seren-symposium.yaml

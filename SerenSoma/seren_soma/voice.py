@@ -1,16 +1,17 @@
-#!/usr/bin/env python3
-"""The Seren voice link's first server: stands where Xiaozhi's cloud stood.
+"""The body's nervous system: stands where Xiaozhi's cloud stood.
 
-The device checks in at POST /ota/, is told to use our websocket, and speaks Xiaozhi's protocol to
+The robot checks in at POST /ota/, is told to use our websocket, and speaks Xiaozhi's protocol to
 /voice (see firmware/docs/voice-link.md). What it hears goes to Lodestar's hear route and lands in
-state/heard.jsonl. What it says comes from Lodestar's speak route, in my voice, by POST /say.
+<state>/heard.jsonl. What it says comes from Lodestar's speak route, by POST /say. It reads the head
+sensor into touches and faces, and it owns night mode and work hours.
 
-There is no mind in here yet: whoever answers reads heard.jsonl and POSTs /say.
+There is no mind in here: whoever answers reads heard.jsonl and POSTs /say.
 
-    .venv\\Scripts\\python seren_voice.py --advertise 192.168.0.110
-    curl -X POST -H "Authorization: Bearer <state/token>" -d "{\\"text\\":\\"hi\\"}" http://localhost:7480/say
+TWO TOKENS. The API token (<state>/token, or server.bearer_token_*) guards /say, /settings, /touch,
+/clip, /status and /api/logs, and never leaves this box. The device token (<state>/device_token) is
+what /ota/ hands the robot for its websocket, and /ota/ answers only the robot's own address. Until
+7 Nov 2026 they were one token, and /ota/ gave it to anything on the LAN that asked.
 """
-import argparse
 import asyncio
 import io
 import json
@@ -25,16 +26,25 @@ import av
 import numpy as np
 from aiohttp import ClientSession, ClientTimeout, FormData, WSMsgType, web
 
-from touch_read import HEAD_KINDS, Overwhelm, TouchReader, in_window, reaction_for, scritching, scritchy, work_hours
+from .touch_read import HEAD_KINDS, Overwhelm, TouchReader, in_window, reaction_for, scritching, scritchy, work_hours
 
-log = logging.getLogger("seren-voice")
-HERE = Path(__file__).resolve().parent
-STATE = HERE / "state"
+log = logging.getLogger("seren-soma")
+# Where the body keeps what it keeps. use_state() moves all of it; the default is ~/seren-soma/state.
+STATE = Path.home() / "seren-soma" / "state"
 HEARD_DIR = STATE / "heard"
 HEARD_LOG = STATE / "heard.jsonl"
 TOUCH_LOG = STATE / "touch.jsonl"
 CLIPS = STATE / "clips"     # saved sounds, played as they are: ahegao.wav is the one overwhelm plays
 SETTINGS = STATE / "settings.json"
+SERVICE_LOG = STATE / "seren-soma.log"
+
+
+def use_state(folder: Path) -> None:
+    """Point every file this module keeps at one folder."""
+    global STATE, HEARD_DIR, HEARD_LOG, TOUCH_LOG, CLIPS, SETTINGS, SERVICE_LOG
+    STATE = Path(folder)
+    HEARD_DIR, HEARD_LOG, TOUCH_LOG = STATE / "heard", STATE / "heard.jsonl", STATE / "touch.jsonl"
+    CLIPS, SETTINGS, SERVICE_LOG = STATE / "clips", STATE / "settings.json", STATE / "seren-soma.log"
 # What the console changes. Night is off until it's turned on; the rest are what tonight settled on.
 DEFAULT_SETTINGS = {
     "night": {"enabled": False, "start": "22:30", "end": "07:00", "dimmer": 15, "volume": 30, "brightness": 20},
@@ -103,12 +113,27 @@ def has_words(text: str) -> bool:
     return SOUND_TAGS.match(text) is None
 
 
-def token_file() -> str:
-    STATE.mkdir(exist_ok=True)
-    p = STATE / "token"
+def token_file(name: str = "token") -> str:
+    """A token kept in the state folder, made the first time it's asked for."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    p = STATE / name
     if not p.exists():
         p.write_text(secrets.token_urlsafe(24), encoding="utf-8")
     return p.read_text(encoding="utf-8").strip()
+
+
+# What was heard is the one thing in the log a person said. "Copy for help" never carries it.
+HEARD_LINE = re.compile(r"(heard \([^)]*\): )(.*)$")
+BEARER = re.compile(r"(Bearer\s+)\S+", re.I)
+
+
+def scrub(line: str) -> str:
+    """A log line fit to hand someone: what was said becomes how many words, a bearer becomes <token>."""
+    m = HEARD_LINE.search(line)
+    if m:
+        words = len(m.group(2).split())
+        line = line[:m.start(2)] + f"[said {words} word{'s' if words != 1 else ''}]"
+    return BEARER.sub(r"\1<token>", line)
 
 
 def lodestar_from_symposium(path: Path) -> tuple[str, str]:
@@ -221,9 +246,14 @@ class Device:
 
 class Link:
     def __init__(self, args):
+        """args: what config.SomaConfig.runtime() hands over: host, port, advertise, voice, device,
+        idle_close, api_token, device_token, robot_token, device_from, lodestar_url, lodestar_token."""
         self.args = args
-        self.token = token_file()
-        self.lodestar_url, self.lodestar_token = lodestar_from_symposium(Path(args.symposium_yaml).expanduser())
+        self.token = args.api_token
+        self.device_token = args.device_token
+        self.robot_token = args.robot_token
+        self.lodestar_url, self.lodestar_token = args.lodestar_url, args.lodestar_token
+        self.started = time.time()
         self.device: Device | None = None
         self.http: ClientSession | None = None
         self.say_lock = asyncio.Lock()
@@ -290,8 +320,7 @@ class Link:
     async def wake_device(self):
         """Open the channel from this end. It stays deaf, and hangs up after the line: I can get
         Chad's attention without the mic listening to a room he didn't open it in."""
-        token_path = STATE / "control_token"
-        headers = {"X-StackChan-Token": token_path.read_text(encoding="utf-8").strip()} if token_path.exists() else {}
+        headers = self.robot_headers()
         self.waking = True
         try:
             async with self.http.post(f"http://{self.args.device}:8080/api/wake", headers=headers, data=b"{}",
@@ -363,17 +392,25 @@ class Link:
 
     # -- routes ---------------------------------------------------------------------------
 
+    def robot_headers(self) -> dict:
+        return {"X-StackChan-Token": self.robot_token} if self.robot_token else {}
+
     async def ota(self, request):
-        """The check-in. No mqtt, no activation, no firmware: the websocket is all it gets."""
+        """The check-in. No mqtt, no activation, no firmware: the websocket is all it gets, and only
+        the robot gets it. Anyone else asking is told no and logged."""
+        if self.args.device_from and request.remote not in self.args.device_from:
+            log.warning("check-in from %s refused: only %s get the voice channel", request.remote,
+                        ", ".join(sorted(self.args.device_from)))
+            raise web.HTTPForbidden(text="not this body's robot")
         host = self.args.advertise
         return web.json_response({
-            "websocket": {"url": f"ws://{host}:{self.args.port}/voice", "token": self.token, "version": 1},
+            "websocket": {"url": f"ws://{host}:{self.args.port}/voice", "token": self.device_token, "version": 1},
             "server_time": {"timestamp": int(time.time() * 1000), "timezone_offset": -time.timezone // 60},
         })
 
     async def voice(self, request):
         auth = request.headers.get("Authorization", "")
-        if not secrets.compare_digest(auth, f"Bearer {self.token}"):
+        if not secrets.compare_digest(auth, f"Bearer {self.device_token}"):
             return web.Response(status=401, text="bad token")
         ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024, heartbeat=None)
         await ws.prepare(request)
@@ -476,8 +513,7 @@ class Link:
     async def watch_night(self):
         """Night caps for the robot's lights, speaker and screen, every minute while it's night, and off
         when it isn't. Every minute rather than once, so a reboot at night comes back dim."""
-        token_path = STATE / "control_token"
-        headers = {"X-StackChan-Token": token_path.read_text(encoding="utf-8").strip()} if token_path.exists() else {}
+        headers = self.robot_headers()
         while True:
             n = self.settings["night"]
             night = n["enabled"] and in_window(time.localtime(), n["start"], n["end"])
@@ -518,6 +554,40 @@ class Link:
         return web.json_response({"events": [e for e in self.feed if e["seq"] > after], "last": self.feed_seq,
                                   "overwhelm": self.overwhelm_state})
 
+    async def health(self, request):
+        """Public: is it up, and which version. Nothing about what it holds."""
+        from . import __version__
+        return web.json_response({"ok": True, "service": "seren-soma", "version": __version__})
+
+    async def logs(self, request):
+        """GET /api/logs?lines=200: the end of the service log, scrubbed (see scrub), for a person to send
+        someone helping them. Behind the API token like everything else that isn't the page itself."""
+        self.authorized(request)
+        try:
+            n = max(1, min(2000, int(request.query.get("lines", "200"))))
+        except ValueError:
+            n = 200
+        try:
+            with SERVICE_LOG.open("rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 400_000))
+                tail = f.read().decode("utf-8", "replace").splitlines()[-n:]
+        except OSError:
+            tail = []
+        return web.json_response({"lines": [scrub(line) for line in tail], "file": str(SERVICE_LOG)})
+
+    async def about(self, request):
+        """What the viewer's front page shows: the body as this server sees it."""
+        self.authorized(request)
+        from . import __version__
+        d = self.device
+        return web.json_response({
+            "version": __version__, "up_seconds": round(time.time() - self.started),
+            "robot": self.args.device, "advertise": self.args.advertise,
+            "channel_open": d is not None, "speaking": bool(d and d.speaking), "deaf": bool(d and d.deaf),
+            "night_now": self.night_now, "overwhelm": self.overwhelm_state, "state": str(STATE),
+        })
+
     async def status(self, request):
         self.authorized(request)
         return web.json_response({"ok": True, "device": self.device is not None,
@@ -527,8 +597,7 @@ class Link:
         """Read the head sensor's raw feed and log what the hand is doing, so I can feel it:
         each touch, and a summary of each session once the hand has gone away (touch_read.py)."""
         base = f"http://{self.args.device}:8080/api"
-        token_path = STATE / "control_token"
-        headers = {"X-StackChan-Token": token_path.read_text(encoding="utf-8").strip()} if token_path.exists() else {}
+        headers = self.robot_headers()
         reader = TouchReader()
         since = 0
         spots = None        # the names of the face's touch spots, read again after a reboot and every 30 s
@@ -652,20 +721,7 @@ class Link:
         await self.http.close()
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--port", type=int, default=7480)
-    ap.add_argument("--advertise", required=True, help="the address the device can reach this box on")
-    ap.add_argument("--voice", default="wren")
-    ap.add_argument("--device", default="192.168.0.201", help="the robot, for head touch")
-    ap.add_argument("--idle-close", type=float, default=60, help="seconds without words before hanging up")
-    ap.add_argument("--symposium-yaml", default="~/seren/wren/apps/symposium/seren-symposium.yaml")
-    args = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
-
-    link = Link(args)
+def make_app(link: "Link", viewer_html: str = "") -> web.Application:
     app = web.Application(client_max_size=8 * 1024 * 1024)
     app.on_startup.append(link.on_start)
     app.on_cleanup.append(link.on_stop)
@@ -677,8 +733,16 @@ def main():
     app.router.add_get("/settings", link.settings_get)
     app.router.add_post("/settings", link.settings_post)
     app.router.add_get("/touch", link.touch_feed)
-    web.run_app(app, host=args.host, port=args.port, print=None)
+    app.router.add_get("/health", link.health)
+    app.router.add_get("/api/about", link.about)
+    app.router.add_get("/api/logs", link.logs)
+    if viewer_html:
+        async def viewer(request):
+            return web.Response(text=viewer_html, content_type="text/html",
+                                headers={"Cache-Control": "no-store, must-revalidate"})
 
-
-if __name__ == "__main__":
-    main()
+        async def root(request):
+            raise web.HTTPFound("/viewer")
+        app.router.add_get("/viewer", viewer)
+        app.router.add_get("/", root)
+    return app

@@ -1,5 +1,5 @@
-"""Traces taken from Chad's hand on 5 Nov 2026.  python test_touch_read.py"""
-import touch_read as tr
+"""Traces taken from Chad's hand on 5 Nov 2026."""
+from seren_soma import touch_read as tr
 
 
 def rows(patterns, start=1000, step=50):
