@@ -73,6 +73,7 @@ calls from anything on the network, and says so in its boot log.
 | | |
 |---|---|
 | `GET /api/status` | Uptime, battery, heap, the face, what each LED shows, the settings. |
+| `POST /api/sound` | Play one of the face's own sounds (`snd_<name>.ogg` from the card), on the robot itself. `GET /api/touch-spots` lists them. |
 | `POST /api/config` | The `soma.yaml` keys over the network (Wi-Fi, voice server, token, tailnet), saved, never echoed back. `reboot: true` to apply them. |
 | `POST /api/settings` | Read, or save, the master light dimmer, speaker volume and screen brightness (all 0 to 100; saved on the robot). `night` puts a cap over them that is never saved. |
 | `POST /api/emotion`, `/api/react` | A pose, or a pose for a moment. `rest: true` makes a pose the one the robot goes back to. |

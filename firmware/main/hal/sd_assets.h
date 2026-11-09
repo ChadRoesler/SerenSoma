@@ -6,6 +6,7 @@
 #pragma once
 #include <cstddef>
 #include <string>
+#include <vector>
 
 /**
  * @brief Face assets read from microSD at boot.
@@ -36,6 +37,12 @@ bool load();
  * @return false if the card supplied no such file
  */
 bool get(const std::string& name, void*& ptr, size_t& size);
+
+/**
+ * @brief The names of the card's assets that start with prefix, as they were read (lowercase).
+ * A face's sounds are "snd_<name>.ogg": names_with_prefix("snd_") lists them.
+ */
+std::vector<std::string> names_with_prefix(const std::string& prefix);
 
 /**
  * @brief Whether a face was loaded from the card this boot.

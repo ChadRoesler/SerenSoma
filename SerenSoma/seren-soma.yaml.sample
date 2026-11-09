@@ -15,7 +15,7 @@ state_dir: ~/seren-soma/state
 # advertise: 192.0.2.10
 
 # voice: ""               # the voice Lodestar speaks in; blank: Lodestar's default
-idle_close_seconds: 60     # an open channel with no words this long hangs up
+idle_close_seconds: 60     # the dead-air timer to start with: no words this long hangs up. Change it live on the page.
 
 robot:
   url: http://192.0.2.21:8080   # required: the robot's control API (its screen shows the address)

@@ -2,6 +2,12 @@
   <div class="card">
     <h3>The body</h3>
     <div id="facts" class="facts muted">Looking…</div>
+    <h4>Voice channel</h4>
+    <label class="field"><span>Dead air</span><input type="range" id="deadAir" min="10" max="600" step="5">
+      <output id="deadAirOut" class="tiny"></output></label>
+    <p class="muted tiny">How long an open channel waits with no words before it hangs up. Takes effect on the next
+      silence; nothing restarts.</p>
+    <div class="msg tiny" id="deadAirMsg"></div>
     <p class="muted tiny">This page builds the body: setting the robot up, its firmware, and its log for whoever's
       helping. Its faces, and watching and feeling how it's touched, are SerenPsycheion's.</p>
   </div>

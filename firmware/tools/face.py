@@ -35,6 +35,11 @@ ASSETS_BIN = FIRMWARE_ROOT / "main" / "assets" / "assets_bin"
 
 SCREEN_W, SCREEN_H = 320, 240
 MAX_ASSET_NAME = 32
+# A face's sounds: Ogg Opus, played by the robot itself (POST /api/sound). Opus at voice
+# quality is ~3-4 KB a second, so these leave the art its room in the 2 MB the robot loads.
+SOUND_NAME = r"[a-z0-9_-]{1,24}"      # snd_<name>.ogg stays inside MAX_ASSET_NAME
+MAX_SOUND_BYTES = 96 * 1024           # about 25 s at voice quality
+MAX_SOUNDS_BYTES = 256 * 1024
 ASSETS_PARTITION_BYTES = 4 * 1024 * 1024
 MANIFEST_VERSION = 2
 
@@ -278,6 +283,7 @@ class Face:
         self.emotions = self._resolve_emotions(doc.get("emotions") or {})
         self.touch = self._resolve_touch(doc.get("touch"))
         self.head = self._resolve_head(doc.get("head"))
+        self.sounds = self._resolve_sounds(doc.get("sounds"))
 
     def _resolve_emotions(self, overrides):
         """Merge author overrides onto the defaults, then degrade any reference
@@ -370,6 +376,36 @@ class Face:
                 print(f"  warning: head touch {kind} wants pose '{spec.get('pose')}', which this face doesn't have; left out")
             else:
                 out[kind] = {"pose": spec["pose"], "ms": int(spec.get("ms", 2000))}
+        return out
+
+    def _resolve_sounds(self, sounds):
+        """sounds: {name: file.ogg} -> the ones that can go to the robot, by name. Checked here so a
+        bad one says why at build time, not as silence on the robot."""
+        out = {}
+        total = 0
+        for name, src in (sounds or {}).items():
+            name = str(name)
+            if not re.fullmatch(SOUND_NAME, name):
+                print(f"  warning: sound '{name}' isn't a name the robot takes (a-z, 0-9, - and _, up to 24); left out")
+                continue
+            path = self.path(str(src))
+            try:
+                data = path.read_bytes()
+            except OSError:
+                print(f"  warning: sound {name}: can't read {src}; left out")
+                continue
+            if data[:4] != b"OggS" or b"OpusHead" not in data[:128]:
+                print(f"  warning: sound {name}: {src} isn't Ogg Opus; left out. Make one with:\n"
+                      f"           ffmpeg -i {Path(str(src)).stem}.wav -ac 1 -c:a libopus -b:a 24k {Path(str(src)).stem}.ogg")
+                continue
+            if len(data) > MAX_SOUND_BYTES:
+                print(f"  warning: sound {name} is {len(data) // 1024} KB, over {MAX_SOUND_BYTES // 1024} KB; left out")
+                continue
+            if total + len(data) > MAX_SOUNDS_BYTES:
+                print(f"  warning: sound {name} would take the face's sounds past {MAX_SOUNDS_BYTES // 1024} KB; left out")
+                continue
+            total += len(data)
+            out[name] = path
         return out
 
     def _resolve_motion(self, motion, emotion):
@@ -868,6 +904,16 @@ class Builder:
         self.written[name] = produced.stat().st_size
         return name
 
+    def sound(self, name, path):
+        """One of the face's sounds, copied in as snd_<name>.ogg: the robot plays it as it is."""
+        out = "snd_%s.ogg" % name
+        if self.dry:
+            self.written[out] = 0
+            return out
+        shutil.copy(str(path), str(self.out / out))
+        self.written[out] = Path(path).stat().st_size
+        return out
+
     def asset_map(self, role, mapping, mirror=False, side=None):
         return {key: self.eye_asset("%s_%s" % (role, key), src, side, mirror) for key, src in mapping.items()}
 
@@ -899,9 +945,15 @@ def cmd_build(args):
         # Mirror the side that was not drawn.
         mir_left = mir and face.drawn_eye == "right"
         mir_right = mir and face.drawn_eye == "left"
+        sound_names = []
+        for name, path in sorted(face.sounds.items()):
+            b.sound(name, path)
+            sound_names.append(name)
         manifest = {
             **({"touch": face.touch} if face.touch is not None else {}),
             **({"head": face.head} if face.head is not None else {}),
+            # the robot finds them by file (snd_<name>.ogg); listed here so a reader of face.json knows
+            **({"sounds": sound_names} if sound_names else {}),
             "name": face.name,
             "version": MANIFEST_VERSION,
             "background": face.background,

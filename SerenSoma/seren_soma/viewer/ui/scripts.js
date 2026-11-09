@@ -140,7 +140,24 @@ async function installFirmware(version) {
   } catch (e) { say("fwMsg", e.message, true); }
 }
 
+// ── The dead-air timer: a live setting ──────────────────────────────
+function secs(n) { return n >= 60 ? `${Math.floor(n / 60)}m${n % 60 ? " " + (n % 60) + "s" : ""}` : `${n}s`; }
+async function loadDeadAir() {
+  let s;
+  try { s = await (await call("/settings", {})).json(); } catch (e) { say("deadAirMsg", e.message, true); return; }
+  const v = s.channel.dead_air_seconds, el = $("deadAir");
+  el.value = v; $("deadAirOut").textContent = secs(v);
+  el.oninput = () => { $("deadAirOut").textContent = secs(Number(el.value)); };
+  el.onchange = async () => {
+    try {
+      const r = await (await post("/settings", { channel: { dead_air_seconds: Number(el.value) } })).json();
+      say("deadAirMsg", `Saved: ${secs(r.channel.dead_air_seconds)} of dead air hangs up.`);
+    } catch (e) { say("deadAirMsg", e.message, true); }
+  };
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  loadDeadAir();
   $("suSend").onclick = setupSend; $("suCard").onclick = setupCard;
   $("fwFetch").onclick = fetchFirmware; $("fwUpload").onclick = uploadFirmware;
 });

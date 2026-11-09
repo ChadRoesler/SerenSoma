@@ -85,7 +85,7 @@ class SomaConfig:
     state_dir: str = "~/seren-soma/state"
     advertise: str = ""        # this box as the robot reaches it; blank: worked out at startup
     voice: str = ""            # the voice Lodestar speaks in; blank: Lodestar's own default
-    idle_close_seconds: float = 60.0
+    idle_close_seconds: float = 60.0    # where the dead-air timer starts; after that it's a live setting (/settings)
     updates: bool = True       # "is there a newer seren-soma", checked against PyPI
     firmware_repo: str = "ChadRoesler/SerenSoma"   # where fw-v* releases come from (GitHub owner/repo)
     robot: RobotConfig = field(default_factory=RobotConfig)

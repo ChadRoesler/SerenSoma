@@ -426,6 +426,29 @@ free for the green, blue and red status lights, which sit above everything else 
 the rails. A face with no `lights` at all never touches them. LEDs mix color
 differently from a screen, so judge it on the robot with **Try this pose**.
 
+### Sounds
+
+A face can carry its own sounds, and the robot plays them itself: no voice server, no call open.
+
+```yaml
+sounds:
+  gasp: sounds/gasp.ogg
+  giggle: sounds/giggle.ogg
+```
+
+Each one is **Ogg Opus**, mono, ideally voice quality (a few KB a second). Make one from a WAV with:
+
+```bash
+ffmpeg -i gasp.wav -ac 1 -c:a libopus -b:a 24k gasp.ogg
+```
+
+- Names are `a-z`, `0-9`, `-` and `_`, up to 24 characters. Each goes on the card as `snd_<name>.ogg`.
+- Up to 96 KB a sound (about 25 seconds) and 256 KB for all of a face's sounds, so the art keeps its room in
+  the 2 MB the robot loads. `face.py build` says which one was left out and why.
+- They load into PSRAM at boot with the rest of the face (the card can only be read then). `GET /api/touch-spots`
+  lists them as `sounds`; `POST /api/sound {"name": "gasp"}` plays one. One at a time, and never over a reply
+  being spoken (that's a 409).
+
 ## Emotions
 
 Xiaozhi's full vocabulary, from `emoji_collection.cc`. **All 21 have working

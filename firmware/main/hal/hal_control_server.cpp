@@ -49,6 +49,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include "board/hal_bridge.h"
 #include "board/stackchan_camera.h"
 #include <jpg/image_to_jpeg.h>
@@ -58,6 +59,7 @@
 #include "face_push.h"
 #include "touch_log.h"
 #include "soma_config.h"
+#include "sd_assets.h"
 #include "hal.h"
 #include <mooncake_log.h>
 #include <sdkconfig.h>
@@ -67,6 +69,7 @@ static const std::string_view _tag = "HAL-Control";
 #ifdef CONFIG_STACKCHAN_CONTROL_SERVER
 
 #include <esp_http_server.h>
+#include <esp_wifi.h>
 #include <esp_err.h>
 #include <esp_event.h>
 #include <esp_netif.h>
@@ -645,6 +648,97 @@ esp_err_t handle_touch_spots(httpd_req_t* req)
             }
         }
     }
+    // The face's own sounds (snd_<name>.ogg on the card), by name: what POST /api/sound plays.
+    cJSON* sounds = cJSON_AddArrayToObject(root, "sounds");
+    for (const auto& file : sd_assets::names_with_prefix("snd_")) {
+        if (file.size() > 8 && file.compare(file.size() - 4, 4, ".ogg") == 0) {
+            cJSON_AddItemToArray(sounds, cJSON_CreateString(file.substr(4, file.size() - 8).c_str()));
+        }
+    }
+    return send_json(req, root);
+}
+
+/*
+ * POST /api/sound {"name": "gasp"}: play one of the face's sounds, snd_<name>.ogg from the card,
+ * on the robot itself. No voice channel, no voice server: the clip is already in PSRAM.
+ *
+ * Its own task, its stack in PSRAM: the player blocks until all but the last second or so is
+ * queued, and this server is one task, so playing it here would stall every other call for the
+ * length of the clip. One task for the life of the robot, made on the first sound and fed through
+ * a one-slot queue: a task that deleted itself after each sound would need a clean-up task out of
+ * internal RAM every time. One at a time, and not over a reply being spoken.
+ */
+std::atomic<bool> _sound_playing{false};
+QueueHandle_t _sound_queue = nullptr;
+
+struct SoundJob_t {
+    const char* data;
+    size_t size;
+};
+
+void sound_task(void*)
+{
+    SoundJob_t job;
+    while (true) {
+        if (xQueueReceive(_sound_queue, &job, portMAX_DELAY) == pdTRUE) {
+            hal_bridge::app_play_sound(std::string_view(job.data, job.size));
+            _sound_playing = false;
+        }
+    }
+}
+
+bool sound_player_ready()
+{
+    if (_sound_queue != nullptr) {
+        return true;
+    }
+    _sound_queue = xQueueCreate(1, sizeof(SoundJob_t));
+    if (_sound_queue == nullptr) {
+        return false;
+    }
+    if (xTaskCreatePinnedToCoreWithCaps(sound_task, "sound", 4 * 1024, nullptr, 3, nullptr, 1, MALLOC_CAP_SPIRAM) != pdPASS) {
+        vQueueDelete(_sound_queue);
+        _sound_queue = nullptr;
+        return false;
+    }
+    return true;
+}
+
+esp_err_t handle_sound(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body = read_body(req);
+    const cJSON* name = cJSON_GetObjectItem(body, "name");
+    std::string file;
+    if (cJSON_IsString(name) && name->valuestring != nullptr && std::strlen(name->valuestring) <= 24) {
+        file = std::string("snd_") + name->valuestring + ".ogg";
+    }
+    cJSON_Delete(body);
+    if (file.empty()) {
+        return send_error(req, "400 Bad Request", "expected {\"name\": one of the face's sounds}");
+    }
+    void* data  = nullptr;
+    size_t size = 0;
+    if (!sd_assets::get(file, data, size)) {
+        return send_error(req, "404 Not Found", "this face has no sound by that name");
+    }
+    if (hal_bridge::app_is_speaking()) {
+        return send_error(req, "409 Conflict", "it's speaking; a sound would talk over it");
+    }
+    bool idle = false;
+    if (!_sound_playing.compare_exchange_strong(idle, true)) {
+        return send_error(req, "409 Conflict", "a sound is already playing");
+    }
+    const SoundJob_t job{static_cast<const char*>(data), size};
+    if (!sound_player_ready() || xQueueSend(_sound_queue, &job, 0) != pdTRUE) {
+        _sound_playing = false;
+        return send_error(req, "503 Service Unavailable", "couldn't start the player");
+    }
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "bytes", static_cast<double>(size));
     return send_json(req, root);
 }
 
@@ -814,17 +908,48 @@ esp_err_t handle_photo(httpd_req_t* req)
     return err;
 }
 
-esp_err_t handle_face(httpd_req_t* req)
-{
-    if (!token_ok(req)) {
-        return send_error(req, "401 Unauthorized", "bad or missing token");
+/**
+ * Wi-Fi fully awake while it lives, then back to what it was. Idle, the firmware keeps the radio in
+ * its deepest power save (it wakes only for beacons), which is fine for a status call and hopeless
+ * for a 1.5 MB upload: the sender's TCP backs off and the receive times out (8 Nov 2026). Restores
+ * the level it found, so a voice call's own setting survives a face sent in the middle of it.
+ */
+struct WifiAwake_t {
+    wifi_ps_type_t was = WIFI_PS_NONE;
+    bool got           = false;
+    WifiAwake_t()
+    {
+        got = esp_wifi_get_ps(&was) == ESP_OK;
+        esp_wifi_set_ps(WIFI_PS_NONE);
     }
+    ~WifiAwake_t()
+    {
+        if (got) {
+            esp_wifi_set_ps(was);
+        }
+    }
+};
 
-    char crc_text[12] = {0};
-    if (req->content_len <= 0 || httpd_req_get_hdr_value_str(req, "X-Face-Crc32", crc_text, sizeof(crc_text)) != ESP_OK) {
-        return send_error(req, "400 Bad Request", "expected a bundle and an X-Face-Crc32 header");
-    }
-    const uint32_t crc = std::strtoul(crc_text, nullptr, 16);
+/*
+ * Taking a face is its own task. This server is one task, and a bundle takes it a good twelve
+ * seconds at full speed; meanwhile the voice server polls once a second and Psycheion every five,
+ * and those requests piled up in a network stack with very little RAM until the upload itself
+ * starved (8 Nov 2026: 15 KB/s and a reset with them running, 120 KB/s with them paused). Handed
+ * to a worker (IDF's async requests), the server answers everyone else at once while it runs.
+ *
+ * The worker's stack is internal RAM, not PSRAM: the flash can't be erased or written from a task
+ * whose stack is in PSRAM. It's made for one upload and gone after (6 KB, for those seconds).
+ */
+std::atomic<bool> _face_busy{false};
+
+struct FaceJob_t {
+    httpd_req_t* req;
+    uint32_t crc;
+};
+
+esp_err_t receive_face(httpd_req_t* req, uint32_t crc)
+{
+    WifiAwake_t awake;
 
     if (!face_push::begin(req->content_len)) {
         return send_error(req, "400 Bad Request", "no room for a bundle that size");
@@ -862,6 +987,46 @@ esp_err_t handle_face(httpd_req_t* req)
     cJSON_AddBoolToObject(root, "ok", true);
     cJSON_AddNumberToObject(root, "bytes", req->content_len);
     return send_json(req, root);
+}
+
+void face_task(void* arg)
+{
+    auto* job = static_cast<FaceJob_t*>(arg);
+    receive_face(job->req, job->crc);
+    httpd_req_async_handler_complete(job->req);
+    delete job;
+    _face_busy = false;
+    vTaskDelete(nullptr);   // an internal-RAM task: the idle task frees it
+}
+
+esp_err_t handle_face(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    char crc_text[12] = {0};
+    if (req->content_len <= 0 || httpd_req_get_hdr_value_str(req, "X-Face-Crc32", crc_text, sizeof(crc_text)) != ESP_OK) {
+        return send_error(req, "400 Bad Request", "expected a bundle and an X-Face-Crc32 header");
+    }
+    const uint32_t crc = std::strtoul(crc_text, nullptr, 16);
+
+    bool idle = false;
+    if (!_face_busy.compare_exchange_strong(idle, true)) {
+        return send_error(req, "409 Conflict", "a face is already on its way in");
+    }
+    httpd_req_t* copy = nullptr;
+    if (httpd_req_async_handler_begin(req, &copy) != ESP_OK) {
+        _face_busy = false;
+        return send_error(req, "503 Service Unavailable", "couldn't take it on just now");
+    }
+    auto* job = new FaceJob_t{copy, crc};
+    if (xTaskCreatePinnedToCore(face_task, "face_rx", 6 * 1024, job, 4, nullptr, 1) != pdPASS) {
+        delete job;
+        send_error(copy, "503 Service Unavailable", "not enough memory to take a face just now");
+        httpd_req_async_handler_complete(copy);
+        _face_busy = false;
+    }
+    return ESP_OK;
 }
 
 esp_err_t handle_face_restore(httpd_req_t* req)
@@ -1014,7 +1179,7 @@ void start_httpd()
     config.ctrl_port        = CONFIG_STACKCHAN_CONTROL_PORT + 1;
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 24;  // 20 routes; past the cap a route silently fails to register
+    config.max_uri_handlers = 24;  // 21 routes; past the cap a route silently fails to register
 #ifdef CONFIG_STACKCHAN_CAMERA
     config.stack_size = 8192;  // the JPEG encoder runs on this task
 #else
@@ -1078,6 +1243,7 @@ void start_httpd()
         {"/api/wake", HTTP_POST, handle_wake, nullptr},
         {"/api/settings", HTTP_POST, handle_settings, nullptr},
         {"/api/config", HTTP_POST, handle_config, nullptr},
+        {"/api/sound", HTTP_POST, handle_sound, nullptr},
     };
     for (const auto& route : routes) {
         httpd_register_uri_handler(_server, &route);

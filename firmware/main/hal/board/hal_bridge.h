@@ -75,5 +75,6 @@ int soma_setting(const char* key, int fallback);   // Soma's own, saved on the r
 void soma_set_setting(const char* key, int value);
 
 void app_play_sound(const std::string_view& sound);
+bool app_is_speaking();   // the voice channel is playing a reply right now
 
 }  // namespace hal_bridge

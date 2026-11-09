@@ -211,3 +211,32 @@ def test_the_page_builds_the_body_set_up_and_firmware_included():
     html = render_from_dir(Path(voice.__file__).parent / "viewer" / "ui", title="SerenSoma", brand="Seren<b>Soma</b>")
     for want in ('data-tab="setup"', 'data-tab="firmware"', 'id="suSend"', 'id="fwFetch"', "/robot/config", "/firmware/install"):
         assert want in html, want
+
+
+def test_the_dead_air_timer_starts_from_the_yaml_and_then_is_live(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.idle_close_seconds = 45
+
+    async def go(client, rt):
+        auth = {"Authorization": f"Bearer {rt.api_token}"}
+        first = (await (await client.get("/settings", headers=auth)).json())["channel"]["dead_air_seconds"]
+        ok = await client.post("/settings", json={"channel": {"dead_air_seconds": 120}}, headers=auth)
+        low = await client.post("/settings", json={"channel": {"dead_air_seconds": 5}}, headers=auth)
+        high = await client.post("/settings", json={"channel": {"dead_air_seconds": 601}}, headers=auth)
+        after = (await (await client.get("/settings", headers=auth)).json())["channel"]["dead_air_seconds"]
+        return first, ok.status, low.status, await low.text(), high.status, after
+    first, ok, low, why, high, after = _serve(cfg, go)
+    assert first == 45 and ok == 200 and after == 120
+    assert low == 400 and high == 400 and "10 to 600" in why
+
+
+def test_a_saved_dead_air_beats_the_yaml_and_the_silence_watcher_reads_it_live(tmp_path):
+    cfg = _cfg(tmp_path)
+    rt = cfg.runtime()
+    (tmp_path / "state" / "settings.json").write_text('{"channel": {"dead_air_seconds": 90}}', encoding="utf-8")
+    link = voice.Link(rt)
+    assert link.dead_air == 90                       # saved wins over the yaml's 60
+    link.settings = voice.merge_settings(link.settings, {"channel": {"dead_air_seconds": 30}})
+    assert link.dead_air == 30                       # what watch_silence reads, every second
+    (tmp_path / "state" / "settings.json").unlink()
+    assert voice.load_settings(7)["channel"]["dead_air_seconds"] == 10   # a yaml value is held to the range

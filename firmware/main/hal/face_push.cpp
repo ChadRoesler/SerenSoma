@@ -8,6 +8,7 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_partition.h>
+#include <esp_ota_ops.h>
 #include <esp_rom_crc.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -41,14 +42,34 @@ struct Mark_t {
 };
 constexpr char kMagic[4] = {'S', 'C', 'F', 'P'};
 
+constexpr size_t kEraseAhead = 64 * 1024;   // a flash block: erased in one go, a fraction of a second
+
 size_t _length  = 0;
 size_t _written = 0;
+size_t _erased  = 0;   // bytes of the slot erased so far, from 0
 uint32_t _crc   = 0;
 char _result[96] = {0};
 
+/*
+ * Where a bundle waits for the next boot: the app slot that ISN'T running. Until 8 Nov 2026 this
+ * was always ota_1, the spare until the robot took firmware over the air: an OTA boots the app
+ * from ota_1, after which every face push erased the running app and the flash driver aborted
+ * (reset reason: panic, mid-upload). The same slot the next OTA would write, which is fine: the
+ * bundle is read at the next boot and the slot is free again, and an OTA image written over a
+ * waiting bundle just means that bundle never had its mark.
+ *
+ * Only while the running app is good: a pending-verify image (fresh from an OTA, before its first
+ * check-in) can still roll back to the other slot, and a bundle there would leave nothing to boot.
+ */
 const esp_partition_t* slot()
 {
-    return esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGW(kTag, "the running app hasn't checked in yet, so the other slot may be needed to roll back to");
+        return nullptr;
+    }
+    return esp_ota_get_next_update_partition(nullptr);
 }
 
 void set_result(const char* text)
@@ -196,12 +217,15 @@ bool face_push::begin(size_t length)
     if (p == nullptr || length == 0 || length > kMaxBytes || kBody + length > p->size) {
         return false;
     }
-    const size_t rounded = (kBody + length + kSector - 1) / kSector * kSector;
-    if (esp_partition_erase_range(p, 0, rounded) != ESP_OK) {
+    // Only the mark's sector now; the body is erased a block ahead of the writes (write()). Erasing
+    // all of it first took long enough, with the upload unread, that the sender's TCP backed off
+    // and the robot's receive timed out (8 Nov 2026: "the upload was cut short").
+    if (esp_partition_erase_range(p, 0, kBody) != ESP_OK) {
         return false;
     }
     _length  = length;
     _written = 0;
+    _erased  = kBody;
     _crc     = 0;
     return true;
 }
@@ -209,8 +233,19 @@ bool face_push::begin(size_t length)
 bool face_push::write(const void* data, size_t length)
 {
     const esp_partition_t* p = slot();
-    if (p == nullptr || _written + length > _length ||
-        esp_partition_write(p, kBody + _written, data, length) != ESP_OK) {
+    if (p == nullptr || _written + length > _length) {
+        return false;
+    }
+    const size_t end = kBody + _written + length;
+    if (end > _erased) {
+        const size_t total = (kBody + _length + kSector - 1) / kSector * kSector;
+        const size_t upto  = std::min(total, (end + kEraseAhead - 1) / kEraseAhead * kEraseAhead);
+        if (esp_partition_erase_range(p, _erased, upto - _erased) != ESP_OK) {
+            return false;
+        }
+        _erased = upto;
+    }
+    if (esp_partition_write(p, kBody + _written, data, length) != ESP_OK) {
         return false;
     }
     _crc = esp_rom_crc32_le(_crc, static_cast<const uint8_t*>(data), length);

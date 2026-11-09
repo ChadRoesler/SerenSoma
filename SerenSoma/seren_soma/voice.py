@@ -49,6 +49,9 @@ def use_state(folder: Path) -> None:
 DEFAULT_SETTINGS = {
     "night": {"enabled": False, "start": "22:30", "end": "07:00", "dimmer": 15, "volume": 30, "brightness": 20},
     "work_hours": {"days": [0, 1, 2, 3, 4], "start": 8, "end": 17},
+    # The dead-air timer: an open channel with no words this long hangs up. Live: the next silence
+    # uses it. idle_close_seconds in seren-soma.yaml is only where it starts on a fresh install.
+    "channel": {"dead_air_seconds": 60},
     # Off until it's set up: pose is the face it tips into (and rests in through the clip), after the one
     # it settles through, clip a sound in <state>/clips. All three are names from your own face and clips.
     "overwhelm": {"enabled": False, "seconds": 15, "gap_seconds": 3, "rest_seconds": 120,
@@ -56,8 +59,16 @@ DEFAULT_SETTINGS = {
 }
 
 
-def load_settings():
+DEAD_AIR_RANGE = (10, 600)
+
+
+def load_settings(dead_air_default=None):
+    """The saved settings over the defaults. dead_air_default: the yaml's idle_close_seconds, the
+    starting value until one is saved."""
     s = json.loads(json.dumps(DEFAULT_SETTINGS))
+    if dead_air_default is not None:
+        lo, hi = DEAD_AIR_RANGE
+        s["channel"]["dead_air_seconds"] = max(lo, min(hi, int(round(float(dead_air_default)))))
     try:
         saved = json.loads(SETTINGS.read_text(encoding="utf-8"))
         for k, v in saved.items():
@@ -88,6 +99,8 @@ def merge_settings(current, change):
                     raise ValueError(f"{section}.{k} is 0 to 100")
                 if section == "work_hours" and v > 24:
                     raise ValueError(f"{section}.{k} is an hour, 0 to 24")
+                if section == "channel" and not DEAD_AIR_RANGE[0] <= v <= DEAD_AIR_RANGE[1]:
+                    raise ValueError(f"{section}.{k} is seconds, {DEAD_AIR_RANGE[0]} to {DEAD_AIR_RANGE[1]}")
             elif isinstance(want, str) and section == "overwhelm":
                 if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_-]{0,32}", v):
                     raise ValueError(f"{section}.{k} is a name: letters, digits, - and _ (blank for none)")
@@ -276,13 +289,18 @@ class Link:
         self.saying = 0      # replies being rendered or spoken: the channel stays up for them
         self.last_heard = 0.0  # when someone last said real words: within LIVE_S, we're mid-conversation
         self.waking = False
-        self.settings = load_settings()
+        self.settings = load_settings(getattr(args, "idle_close", None))
         self.feed = []              # recent touches for the console: what the hand did, what it was read as, what showed
         self.feed_seq = 0
         self.overwhelm_state = {"running": False, "progress": 0.0}
         self.night_now = None       # what was last sent: True, False, or None before the first look
         self.firmware_armed = None  # {"version", "file"}: offered on the next check-in, once
         HEARD_DIR.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def dead_air(self) -> int:
+        """Seconds of no words before an open channel hangs up: the live setting, read every time."""
+        return int(self.settings["channel"]["dead_air_seconds"])
 
     def lodestar_headers(self):
         return {"Authorization": f"Bearer {self.lodestar_token}"}
@@ -401,7 +419,7 @@ class Link:
                 if time.monotonic() - self.last_heard < LIVE_S:
                     # he's talking to me: stay for an answer, then the usual hang-up applies
                     d.deaf = False
-                    d.last_words = time.monotonic() - max(0, self.args.idle_close - REPLY_WINDOW_S)
+                    d.last_words = time.monotonic() - max(0, self.dead_air - REPLY_WINDOW_S)
                 else:
                     await asyncio.sleep(0.5)    # the tail of the audio, still in the device's queue
                     await d.ws.close()
@@ -1006,8 +1024,8 @@ class Link:
             d = self.device
             if d is None or d.speaking or self.saying or self.say_lock.locked():
                 continue
-            if time.monotonic() - d.last_words >= self.args.idle_close:
-                log.info("no words for %ss: closing the channel", self.args.idle_close)
+            if time.monotonic() - d.last_words >= self.dead_air:
+                log.info("no words for %ss: closing the channel", self.dead_air)
                 await d.ws.close()
 
     async def on_start(self, app):

@@ -361,6 +361,18 @@ bool sd_assets::get(const std::string& name, void*& ptr, size_t& size)
     return true;
 }
 
+std::vector<std::string> sd_assets::names_with_prefix(const std::string& prefix)
+{
+    const std::string key = fold(prefix);
+    std::vector<std::string> out;
+    for (const auto& entry : _assets) {
+        if (std::strncmp(entry.name, key.c_str(), key.size()) == 0) {
+            out.emplace_back(entry.name);
+        }
+    }
+    return out;
+}
+
 bool sd_assets::available()
 {
     return !_assets.empty();
