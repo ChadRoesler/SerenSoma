@@ -141,40 +141,6 @@ def test_scritching_is_a_burst():
     assert not tr.scritching(slow)
 
 
-def test_overwhelm_is_earned():
-    o = tr.Overwhelm()
-    # quick scratches, one a second for 20 s: it tips over once, at 15
-    fired = [t for t in range(21) if o.touch(t * 1000, t * 1000 + 200, True)]
-    assert fired == [15], fired
-    # straight back to it: resting, nothing
-    assert not any(o.touch(t * 1000, t * 1000 + 200, True) for t in range(21, 60))
-    # a pause longer than the gap starts the count again
-    o = tr.Overwhelm()
-    assert not any(o.touch(t * 1000, t * 1000 + 200, True) for t in list(range(0, 10)) + list(range(14, 26)))
-    # one long unbroken scratch, still going: carries the run to 15 s
-    o = tr.Overwhelm()
-    assert not o.touch(0, 2000, True)
-    assert not o.touch(2500, 9000, True, still_going=True)
-    assert o.touch(2500, 15500, True, still_going=True)
-    # a hand still on the head can't start a run by itself
-    o = tr.Overwhelm()
-    assert not o.touch(0, 30000, True, still_going=True) and not o.running
-    # scratch, then pet: the pet ends it
-    o = tr.Overwhelm()
-    assert not o.touch(0, 8000, True)
-    assert not o.touch(9000, 9700, False) and not o.running
-    # A second run on 7 Nov, on the sensor's clock: unbroken from 400755 to 419723, 19 s
-    run = [(400755, 50, "scritch"), (402120, 110, "scritch"), (404837, 410, "scritch"), (405296, 4627, "scritch"),
-           (409930, 4705, "scritch"), (415655, 651, "poke"), (416655, 400, "poke"), (417056, 1969, "scritch")]
-    o = tr.Overwhelm()
-    fired = [s for s, ms, k in run if o.touch(s, s + ms, tr.scritchy({"kind": k, "ms": ms}) or k == "poke")]
-    assert fired, "19 s of scratching gets there at 15"
-    import time
-    assert tr.work_hours(time.strptime("2026-11-06 10:00", "%Y-%m-%d %H:%M"))       # a Friday morning
-    assert not tr.work_hours(time.strptime("2026-11-06 19:00", "%Y-%m-%d %H:%M"))   # Friday night
-    assert not tr.work_hours(time.strptime("2026-11-07 10:00", "%Y-%m-%d %H:%M"))   # Saturday
-
-
 def test_night_window_crosses_midnight():
     import time
     at = lambda hhmm: time.strptime(f"2026-11-07 {hhmm}", "%Y-%m-%d %H:%M")
@@ -185,12 +151,21 @@ def test_night_window_crosses_midnight():
     assert tr.in_window(at("13:00"), "12:00", "14:00") and not tr.in_window(at("14:00"), "12:00", "14:00")
 
 
-def test_overwhelm_takes_its_settings():
-    o = tr.Overwhelm(after_ms=5000)
-    assert [t for t in range(4) if o.touch(t * 1000, t * 1000 + 200, True)] == []
-    assert 0.6 < o.progress() < 0.7          # 3.2 s of 5
-    assert o.touch(5000, 5200, True)
-    assert o.progress() == 0.0               # it fired: the run starts over
+def test_each_head_touch_says_whether_it_is_scratching():
+    # the burst from 7 Nov, then a real pet: the burst is scratching, the pet isn't
+    burst = [{"kind": "stroke", "way": "back_to_front", "ms": 281, "t_ms": 1000},
+             {"kind": "poke", "where": "middle", "ms": 171, "t_ms": 1400},
+             {"kind": "stroke", "way": "back_to_front", "ms": 230, "t_ms": 1800},
+             {"kind": "scritch", "ms": 100, "t_ms": 2300}]
+    recent = tr.label_scratching(burst, [])
+    assert [e["scratching"] for e in burst] == [True, True, True, True] and len(recent) == 4
+    # a real pet runs 450-850 ms (450 itself is on the scritchy line, as it always was): 600, every 1.7 s
+    pet = [{"kind": "stroke", "way": "front_to_back", "ms": 600, "t_ms": 9000 + i * 1700} for i in range(4)]
+    tr.label_scratching(pet, [])
+    assert not any(e["scratching"] for e in pet)
+    spot = [{"kind": "touch_spot", "index": 0, "ms": 0, "t_ms": 1}]
+    tr.label_scratching(spot, [])
+    assert "scratching" not in spot[0]             # the screen isn't the head
 
 
 if __name__ == "__main__":

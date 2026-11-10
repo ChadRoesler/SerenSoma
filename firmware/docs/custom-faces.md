@@ -64,14 +64,16 @@ face can never stop the device from booting.
 
 ## Quick start
 
-```bash
-pip install PyYAML Pillow pypng lz4
+Faces are made with [SerenPsycheion](https://github.com/ChadRoesler/SerenPsycheion): its Face Studio page
+(`/studio`), or its `face` command. No firmware checkout, and no robot until you want to send one.
 
-python firmware/tools/face.py init my_face      # writes a starter face.yaml
+```bash
+pip install seren-psycheion
+
+seren-psycheion face init my_face      # writes a starter face.yaml
 # ... draw the PNGs it lists ...
-python firmware/tools/face.py preview my_face   # contact sheet of all 21 emotions
-python firmware/tools/face.py build my_face     # convert + install
-cd firmware && idf.py build && idf.py flash
+seren-psycheion face preview my_face   # contact sheet of all 21 emotions
+seren-psycheion face build my_face     # convert, into my_face/build
 ```
 
 The loop you will actually live in is **draw → `preview` → draw**. It takes about
@@ -182,15 +184,15 @@ A complete face is roughly **25 source PNGs** and lands around **460 KB** — ab
 
 ```bash
 # contact sheet: all 21 emotions at 1:1
-python tools/face.py preview my_face
+seren-psycheion face preview my_face
 
 # one emotion, pixel-doubled
-python tools/face.py preview my_face --emotion loving --scale 3
+seren-psycheion face preview my_face --emotion loving --scale 3
 
 # animated GIFs
-python tools/face.py preview my_face --animate blink
-python tools/face.py preview my_face --animate talk
-python tools/face.py preview my_face --animate gaze
+seren-psycheion face preview my_face --animate blink
+seren-psycheion face preview my_face --animate talk
+seren-psycheion face preview my_face --animate gaze
 ```
 
 The previewer composites your PNGs the same way the firmware layers them —
@@ -202,10 +204,13 @@ Output lands in `my_face/preview/`.
 
 ### Face Studio: live, editable, animated
 
-Double-click `Face Studio.cmd` in the StackChan folder (or run
-`python firmware/tools/face_studio.py`). It opens a page that draws the face the
-way the firmware's custom skin does, with blink, lip sync, breathing, idle
-glances and decorator pulse running on the firmware's own timings.
+Open Psycheion's `/studio` page (on the box Psycheion runs on, or from any
+browser that can reach it, with its token). It draws the face the way the
+firmware's custom skin does, with blink, lip sync, breathing, idle glances and
+decorator pulse running on the firmware's own timings. Faces live in Psycheion's
+faces folder (`faces_dir`, `~/seren-psycheion/faces` by default): art comes in
+with **Upload files…** (PNGs, a `.pxp`, sounds), and a face goes out to share as
+one file with **Export** and comes back in with **Import .zip…**.
 
 - **Place things.** Drag the anchors on the canvas: eyes, brows, mouth, and the
   shown decorator. Arrow keys nudge by 1 px, or 5 px with Shift. "Mirror moves"
@@ -228,26 +233,25 @@ glances and decorator pulse running on the firmware's own timings.
   and decorators an emotion asks for that you haven't drawn.
 
 **Save face.yaml** writes the file and keeps the previous one as
-`face.yaml.bak-<time>`. Only the comments at the top survive a save. Imported
-PNGs that replace older ones keep the old copy in `.studio-backup/`. Use
+`face.yaml.bak-<time>`. Only the comments at the top survive a save. Uploads
+that replace older files keep the old copy in `.studio-backup/`. Use
 `?face=<folder>&sheet=1` in the address to open a face straight to the
-all-emotions sheet. `build` is still `face.py`'s job.
+all-emotions sheet. Its **Sounds** and **Build-ups** panels are the face's
+`sounds:` and `buildups:` below.
 
 ---
 
 ### Sending a face to the robot
 
 Face Studio's **Robot** panel puts a face on the device without touching the
-microSD card. Give it the robot's address, and the control token if the firmware
-was built with one (`CONFIG_STACKCHAN_CONTROL_TOKEN`).
+microSD card. The robot is the one Psycheion's config names (`soma.robot`), with
+its token; the page keeps no address or token of its own.
 
 - **Try this pose** shows the pose, and its twitch, using the face already there.
 - **Send this face** saves, builds, uploads and reboots, in about 45 seconds. The
   upload waits in flash, and early boot copies it onto the card, because the card
   can't be written once the display is running. The old face stays as `face_old`.
 - **Previous face** swaps `face` and `face_old`.
-
-The studio keeps the address and token in `~/.face_studio.json`.
 
 ## face.yaml reference
 
@@ -476,8 +480,13 @@ custom face nothing renders blank any more.
 
 ## Building and flashing
 
+The usual way is the card: send the face from Face Studio, or build it and copy
+the build to the card as `face/`. To put a face in the firmware image itself
+(the face a robot shows with no card), build it into the assets folder and flash:
+
 ```bash
-python tools/face.py build my_face
+seren-psycheion face build my_face --out firmware/main/assets/assets_bin
+rm -f firmware/build/generated_assets.bin
 cd firmware && idf.py build && idf.py flash
 ```
 
@@ -486,14 +495,14 @@ cd firmware && idf.py build && idf.py flash
 **First time adding the skin sources?** The build globs source files at configure
 time — run `idf.py reconfigure` once.
 
-**Changing art?** `face.py build` deletes `build/generated_assets.bin` for you,
-which forces a repack. Without it, `main/CMakeLists.txt:429` lists only the
-sdkconfig and build script under `DEPENDS`, so changed sprites are silently
-ignored and you flash the previous face.
+**Changing art?** Delete `build/generated_assets.bin` (the `rm` above), which
+forces a repack. Without it, `main/CMakeLists.txt:429` lists only the sdkconfig
+and build script under `DEPENDS`, so changed sprites are silently ignored and you
+flash the previous face.
 
 ```bash
-python tools/face.py build my_face --dry-run    # print the manifest, write nothing
-python tools/face.py build my_face --prefix me  # keep several faces from colliding
+seren-psycheion face build my_face --dry-run    # print the manifest, write nothing
+seren-psycheion face build my_face --prefix me  # keep several faces from colliding
 ```
 
 ---
@@ -513,7 +522,7 @@ I (…) StackChanAvatarDisplay: Using custom face: Cartoon Me
 `build`, then `idf.py build`.
 
 **`face.json is version 1, this firmware needs 2`.**
-Built with the old flat-PNG tool. Rebuild with `tools/face.py build`.
+Built with the old flat-PNG tool. Rebuild with `seren-psycheion face build`.
 
 **I changed my art and nothing changed.** Stale assets. Delete
 `firmware/build/generated_assets.bin` and rebuild.
@@ -568,7 +577,7 @@ firmware/main/stackchan/avatar/skins/custom/
 ├── decorator.cpp       SpriteDecorator — anchored, optional pulse
 └── custom.cpp          CustomAvatar, brows, emotion dispatch
 
-firmware/tools/face.py  init / preview / build
+seren_psycheion/faces/face.py  init / preview / build (in SerenPsycheion)
 ```
 
 Selection and fallback live in `hal/board/stackchan_display.cc`, in `SetupUI()`;
@@ -578,5 +587,5 @@ emotion routing is in `SetEmotion()`.
 
 ## Sharing your face
 
-A face is a folder of PNGs plus `face.yaml`. Zip it and anyone can run
-`face.py build` to install it. If you make something good, open a PR.
+A face is a folder of PNGs, sounds and `face.yaml`. Face Studio's **Export**
+makes it one `.zip`, and **Import .zip…** brings it into anyone's Psycheion.

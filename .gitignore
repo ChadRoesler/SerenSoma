@@ -16,7 +16,7 @@ SerenSoma/seren_soma/_version.py
 seren-soma.yaml
 state/
 
-# the workbench at the root only; a bare tools/ also swallowed firmware/tools, which is Face Studio
+# the workbench at the root only; a bare tools/ also swallowed firmware/tools
 /tools/
 firmware/tools/__pycache__/
 

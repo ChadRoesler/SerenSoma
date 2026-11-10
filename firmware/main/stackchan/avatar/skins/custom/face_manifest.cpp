@@ -217,7 +217,7 @@ FaceManifest_t FaceManifest_t::load()
     manifest.overlayImage = read_string(doc["overlay"]);
 
     if (manifest.version < 2) {
-        mclog::tagError(_tag, "face.json is version {}, this firmware needs 2. Rebuild with tools/face.py",
+        mclog::tagError(_tag, "face.json is version {}, this firmware needs 2. Rebuild it with seren-psycheion face build",
                         manifest.version);
         return manifest;
     }
@@ -406,6 +406,13 @@ FaceManifest_t FaceManifest_t::load()
             spot.gesture = read_string(node["gesture"], "tap");
             manifest.touchSpots.push_back(std::move(spot));
         }
+    }
+
+    // Kept as the JSON it came in: the robot only hands these on (GET /api/touch-spots). Capped so
+    // a face can't spend the robot's RAM on them.
+    auto buildups = doc["buildups"];
+    if (buildups.is<ArduinoJson::JsonObject>() && ArduinoJson::measureJson(buildups) <= 4096) {
+        ArduinoJson::serializeJson(buildups, manifest.buildups);
     }
 
     auto head = doc["head"];

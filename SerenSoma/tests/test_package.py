@@ -140,48 +140,6 @@ def test_no_robot_or_no_lodestar_is_said_at_startup(tmp_path):
         load_config(str(no_lode)).runtime()
 
 
-def test_overwhelm_is_off_and_nameless_until_set_up():
-    d = voice.DEFAULT_SETTINGS["overwhelm"]
-    assert d["enabled"] is False and d["pose"] == d["after"] == d["clip"] == ""
-    ok = voice.merge_settings(voice.DEFAULT_SETTINGS, {"overwhelm": {"enabled": True, "pose": "flustered",
-                                                                    "after": "melt-2", "clip": "gasp_1"}})
-    assert ok["overwhelm"]["pose"] == "flustered" and ok["overwhelm"]["clip"] == "gasp_1"
-    for bad in ("../x", "a b", "x" * 33):
-        with pytest.raises(ValueError, match="is a name"):
-            voice.merge_settings(voice.DEFAULT_SETTINGS, {"overwhelm": {"clip": bad}})
-
-
-def test_overwhelm_shows_the_poses_its_settings_name(tmp_path, monkeypatch):
-    from aiohttp import web as aweb
-    posted = []
-
-    async def emotion(request):
-        posted.append(await request.json())
-        return aweb.json_response({"ok": True})
-
-    async def leds(request):
-        return aweb.json_response({"ok": True})
-
-    real_sleep = asyncio.sleep
-
-    async def no_wait(*_):
-        await real_sleep(0)
-
-    async def go():
-        robot = aweb.Application()
-        robot.router.add_post("/api/emotion", emotion)
-        robot.router.add_post("/api/leds", leds)
-        async with TestServer(robot) as rs:
-            link = voice.Link(_cfg(tmp_path).runtime())
-            async with TestClient(TestServer(voice.make_app(link))):
-                link.settings["overwhelm"].update(pose="flustered", after="", clip="")
-                monkeypatch.setattr(voice.asyncio, "sleep", no_wait)
-                await link.overwhelm(str(rs.make_url("/api")).rstrip("/"), {})
-                monkeypatch.setattr(voice.asyncio, "sleep", real_sleep)
-    asyncio.run(go())
-    assert posted == [{"name": "flustered", "rest": True}, {"name": "neutral"}]
-
-
 def test_a_blank_voice_is_left_to_lodestar(tmp_path):
     from aiohttp import web as aweb
     bodies = []
@@ -240,3 +198,12 @@ def test_a_saved_dead_air_beats_the_yaml_and_the_silence_watcher_reads_it_live(t
     assert link.dead_air == 30                       # what watch_silence reads, every second
     (tmp_path / "state" / "settings.json").unlink()
     assert voice.load_settings(7)["channel"]["dead_air_seconds"] == 10   # a yaml value is held to the range
+
+
+def test_the_touch_feed_carries_the_hand_and_no_overwhelm(tmp_path):
+    async def go(client, rt):
+        auth = {"Authorization": f"Bearer {rt.api_token}"}
+        return await (await client.get("/touch", headers=auth)).json(), await (await client.get("/settings", headers=auth)).json()
+    feed, settings = _serve(_cfg(tmp_path), go)
+    assert feed["hand"] == {"down": False} and "overwhelm" not in feed
+    assert "overwhelm" not in settings and "work_hours" in settings   # work hours stay: a fact about the house

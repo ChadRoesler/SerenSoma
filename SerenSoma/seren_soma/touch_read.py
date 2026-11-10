@@ -78,58 +78,9 @@ REACTIONS = {
 }
 
 
-# Overwhelm (7 Nov 2026): scritches that don't stop for this long tip the face over into the pose
-# overwhelm.pose names (off until it's set up, in the voice server's settings). Earned, never by accident: a gap longer than OVERWHELM_GAP_S starts the
-# count again, and once it fires it rests for OVERWHELM_REST_S.
-OVERWHELM_MS = 15000     # 20 s was a lot of arm in testing
-OVERWHELM_GAP_MS = 3000
-OVERWHELM_REST_MS = 120000
-WORK_HOURS = (8, 17)        # weekdays, local time: never then. The default; /settings changes it.
-
-
 def scritchy(event):
     """Part of scratching: a scritch, or one of the quick bits scratching breaks into."""
     return event["kind"] == "scritch" or (event["kind"] in ("stroke", "poke") and event["ms"] <= SCRITCH_BURST_MAX_MS)
-
-
-@dataclass
-class Overwhelm:
-    """On the sensor's clock, so one long unbroken scratch counts all the way through."""
-    since: float = None
-    last: float = -1e12
-    fired: float = -1e12
-    after_ms: int = OVERWHELM_MS
-    gap_ms: int = OVERWHELM_GAP_MS
-    rest_ms: int = OVERWHELM_REST_MS
-
-    def touch(self, start_ms, end_ms, scratching, still_going=False):
-        """A touch from start_ms to end_ms. scratching: it's part of scratching. still_going: the hand
-        hasn't lifted yet, so it can carry a run on but not start one. True when it's time to tip over."""
-        if self.since is not None and (start_ms - self.last > self.gap_ms or not scratching):
-            self.since = None              # a pause, or a real stroke: petting doesn't count
-        if self.since is None:
-            if not scratching or still_going:
-                return False
-            self.since = start_ms
-        self.last = max(self.last, end_ms)
-        if self.last - self.since >= self.after_ms and self.last - self.fired >= self.rest_ms:
-            self.fired = self.last
-            self.since = None
-            return True
-        return False
-
-    @property
-    def running(self):
-        return self.since is not None
-
-    def progress(self):
-        """How far along a run is, 0..1: what the console's meter shows."""
-        return min(1.0, (self.last - self.since) / self.after_ms) if self.running else 0.0
-
-
-def work_hours(local, hours=WORK_HOURS, days=(0, 1, 2, 3, 4)):
-    """local: a time.struct_time. True on one of days (Monday is 0) inside hours."""
-    return local.tm_wday in days and hours[0] <= local.tm_hour < hours[1]
 
 
 def in_window(local, start, end):
@@ -246,3 +197,15 @@ class TouchReader:
             self._session = []
         self._session.append(event)
         return event
+
+
+def label_scratching(events, recent):
+    """Each head touch gets "scratching": whether it's part of scratching, the touch itself or the
+    burst it's in. What a build-up that counts scratching counts (SerenPsycheion's buildups.py); the
+    voice server only says what the hand is doing. recent: the last few head touches, oldest first,
+    carried from call to call. Returns the new recent."""
+    for e in events:
+        if e["kind"] in HEAD_KINDS:
+            recent = (recent + [e])[-6:]
+            e["scratching"] = scritchy(e) or scritching(recent)
+    return recent

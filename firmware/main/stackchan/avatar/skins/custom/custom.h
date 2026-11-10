@@ -224,6 +224,7 @@ struct FaceManifest_t {
     bool touchDeclared = false;  // the face says what its spots are, even if that's none
     std::map<std::string, HeadTouch_t> headTouches;  // stroke_front_to_back, poke_middle, scritch...
     bool headDeclared = false;   // true: these replace the stock response to a pet
+    std::string buildups;        // the face's build-ups as JSON: carried, not run (SerenPsycheion runs them)
 
     /** @brief Load and parse face.json from the assets partition */
     static FaceManifest_t load();
@@ -461,6 +462,11 @@ public:
     {
         return _manifest.glanceLagMs;
     }
+    const std::string& buildups() const
+    {
+        return _manifest.buildups;
+    }
+
     bool headDeclared() const
     {
         return _manifest.headDeclared;

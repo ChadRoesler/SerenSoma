@@ -62,11 +62,9 @@ and mouth curves, and animates them with the existing blink, lip sync, breathing
 and gaze systems. Falls back to the stock face if none is installed.
 
 ```bash
-pip install PyYAML Pillow pypng lz4
-
-python tools/face.py init my_face        # starter face.yaml
-python tools/face.py preview my_face     # render all 21 emotions, no hardware
-python tools/face.py build my_face       # convert + install
+seren-psycheion face init my_face        # starter face.yaml (pip install seren-psycheion)
+seren-psycheion face preview my_face     # render all 21 emotions, no hardware
+seren-psycheion face build my_face       # convert, into my_face/build
 idf.py build && idf.py flash
 ```
 

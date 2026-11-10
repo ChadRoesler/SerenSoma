@@ -35,7 +35,7 @@ All of it lives in the voice server's state folder, `~/seren-soma/state/` by def
 |---|---|
 | [`firmware/`](firmware/) | The robot's firmware, ESP-IDF 6.1 on the CoreS3. Sprite faces, the token-guarded control API, the light rails, the head sensor, sending a face over Wi-Fi. [`firmware/docs/custom-faces.md`](firmware/docs/custom-faces.md) is the face format. |
 | [`SerenSoma/`](SerenSoma/) | `seren-soma`, the nervous system, as a Python package. Speaks the robot's voice protocol, hears through the speech service, reads the head sensor into strokes, pokes, scritches and resting hands, and turns them into faces. Owns night mode and work hours. |
-| `firmware/tools/` | `face.py` (build a face from PNGs) and Face Studio, until they move to SerenPsycheion. |
+| `firmware/tools/` | `emotion_cycle.py`: walk the robot through every emotion, to check a face on the real screen. Making faces (Face Studio, `face.py`) moved to [SerenPsycheion](https://github.com/ChadRoesler/SerenPsycheion) on 9 Nov 2026. |
 
 A mind drives the body through [SerenWorkbench](https://github.com/ChadRoesler/SerenWorkbench)'s
 built-in body tools (`soma_status`, `soma_say`, `soma_pose`...), which can be

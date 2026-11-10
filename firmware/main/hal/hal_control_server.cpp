@@ -637,6 +637,11 @@ esp_err_t handle_touch_spots(httpd_req_t* req)
                 for (const auto& spot : custom->touchSpots()) {
                     cJSON_AddItemToArray(names, cJSON_CreateString(spot.name.c_str()));
                 }
+                if (!custom->buildups().empty()) {
+                    if (cJSON* b = cJSON_Parse(custom->buildups().c_str())) {
+                        cJSON_AddItemToObject(root, "buildups", b);
+                    }
+                }
                 if (custom->headDeclared()) {
                     cJSON* head = cJSON_AddObjectToObject(root, "head");
                     for (const auto& kv : custom->headTouches()) {

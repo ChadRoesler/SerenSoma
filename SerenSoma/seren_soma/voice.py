@@ -26,7 +26,7 @@ import av
 import numpy as np
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, WSMsgType, web
 
-from .touch_read import HEAD_KINDS, Overwhelm, TouchReader, in_window, reaction_for, scritching, scritchy, work_hours
+from .touch_read import HEAD_KINDS, TouchReader, in_window, label_scratching, reaction_for, scritching
 
 log = logging.getLogger("seren-soma")
 # Where the body keeps what it keeps. use_state() moves all of it; the default is ~/seren-soma/state.
@@ -34,7 +34,7 @@ STATE = Path.home() / "seren-soma" / "state"
 HEARD_DIR = STATE / "heard"
 HEARD_LOG = STATE / "heard.jsonl"
 TOUCH_LOG = STATE / "touch.jsonl"
-CLIPS = STATE / "clips"     # saved sounds, played as they are: overwhelm.clip names one
+CLIPS = STATE / "clips"     # saved sounds the voice server plays through the voice channel (POST /clip)
 SETTINGS = STATE / "settings.json"
 SERVICE_LOG = STATE / "seren-soma.log"
 
@@ -48,14 +48,12 @@ def use_state(folder: Path) -> None:
 # What the console changes. Night is off until it's turned on; the rest are what tonight settled on.
 DEFAULT_SETTINGS = {
     "night": {"enabled": False, "start": "22:30", "end": "07:00", "dimmer": 15, "volume": 30, "brightness": 20},
+    # When the person's working: a fact about the house. Nothing here acts on it; SerenPsycheion reads it
+    # and keeps a face's build-ups out of those hours.
     "work_hours": {"days": [0, 1, 2, 3, 4], "start": 8, "end": 17},
     # The dead-air timer: an open channel with no words this long hangs up. Live: the next silence
     # uses it. idle_close_seconds in seren-soma.yaml is only where it starts on a fresh install.
     "channel": {"dead_air_seconds": 60},
-    # Off until it's set up: pose is the face it tips into (and rests in through the clip), after the one
-    # it settles through, clip a sound in <state>/clips. All three are names from your own face and clips.
-    "overwhelm": {"enabled": False, "seconds": 15, "gap_seconds": 3, "rest_seconds": 120,
-                  "pose": "", "after": "", "clip": ""},
 }
 
 
@@ -101,9 +99,6 @@ def merge_settings(current, change):
                     raise ValueError(f"{section}.{k} is an hour, 0 to 24")
                 if section == "channel" and not DEAD_AIR_RANGE[0] <= v <= DEAD_AIR_RANGE[1]:
                     raise ValueError(f"{section}.{k} is seconds, {DEAD_AIR_RANGE[0]} to {DEAD_AIR_RANGE[1]}")
-            elif isinstance(want, str) and section == "overwhelm":
-                if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_-]{0,32}", v):
-                    raise ValueError(f"{section}.{k} is a name: letters, digits, - and _ (blank for none)")
             elif isinstance(want, str):
                 if not isinstance(v, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
                     raise ValueError(f"{section}.{k} is a time like 22:30")
@@ -292,7 +287,7 @@ class Link:
         self.settings = load_settings(getattr(args, "idle_close", None))
         self.feed = []              # recent touches for the console: what the hand did, what it was read as, what showed
         self.feed_seq = 0
-        self.overwhelm_state = {"running": False, "progress": 0.0}
+        self.hand = {"down": False}  # the head touch the hand hasn't lifted from yet, on the robot's clock
         self.night_now = None       # what was last sent: True, False, or None before the first look
         self.firmware_armed = None  # {"version", "file"}: offered on the next check-in, once
         HEARD_DIR.mkdir(parents=True, exist_ok=True)
@@ -783,39 +778,6 @@ class Link:
         seconds = await self.say("", self.args.voice, body.get("emotion"), True, self.clip(body.get("name", "")))
         return web.json_response({"ok": True, "seconds": seconds})
 
-    async def overwhelm(self, base, headers):
-        """Tip over: overwhelm.pose, held through the call; a flash on the rails; overwhelm.clip; then
-        overwhelm.after, then back. Each is skipped when it's blank."""
-        async def post(path, body):
-            try:
-                async with self.http.post(f"{base}{path}", headers=headers, json=body, timeout=ClientTimeout(total=4)) as r:
-                    await r.read()
-            except Exception as e:
-                log.warning("overwhelm %s: %s", path, e)
-
-        o = self.settings["overwhelm"]
-        log.info("overwhelmed")
-        if o.get("pose"):
-            await post("/emotion", {"name": o["pose"], "rest": True})   # resting in it: the clip's "neutral" is it
-        for _ in range(2):
-            await post("/leds", {"frame": [[168, 0, 110]] * 12})
-            await asyncio.sleep(0.15)
-            await post("/leds", {"frame": [[0, 0, 0]] * 12})
-            await asyncio.sleep(0.1)
-        played = False
-        if o.get("clip"):
-            try:
-                await self.say("", self.args.voice, None, True, self.clip(o["clip"]))
-                played = True
-            except Exception as e:
-                log.warning("overwhelm clip: %s", e)
-        if not played:
-            await asyncio.sleep(3)
-        if o.get("after"):
-            await post("/emotion", {"name": o["after"]})                # and the resting pose goes with it
-            await asyncio.sleep(5)
-        await post("/emotion", {"name": "neutral"})
-
     async def watch_night(self):
         """Night caps for the robot's lights, speaker and screen, every minute while it's night, and off
         when it isn't. Every minute rather than once, so a reboot at night comes back dim."""
@@ -854,11 +816,12 @@ class Link:
         return web.json_response(self.settings)
 
     async def touch_feed(self, request):
-        """GET /touch?after=<seq>: touches since then, and where overwhelm stands."""
+        """GET /touch?after=<seq>: touches since then, each head one labelled "scratching", and the hand
+        that's down right now (what a build-up needs to keep counting through one long scratch)."""
         self.authorized(request)
         after = int(request.query.get("after", "0") or 0)
         return web.json_response({"events": [e for e in self.feed if e["seq"] > after], "last": self.feed_seq,
-                                  "overwhelm": self.overwhelm_state})
+                                  "hand": self.hand})
 
     async def root(self, request):
         """The family's info route: who this is, where its page is, and the updates block, which every
@@ -905,7 +868,7 @@ class Link:
             "version": __version__, "up_seconds": round(time.time() - self.started),
             "robot": self.args.device, "advertise": self.args.advertise,
             "channel_open": d is not None, "speaking": bool(d and d.speaking), "deaf": bool(d and d.deaf),
-            "night_now": self.night_now, "overwhelm": self.overwhelm_state, "state": str(STATE),
+            "night_now": self.night_now, "hand": self.hand, "state": str(STATE),
         })
 
     async def status(self, request):
@@ -923,8 +886,6 @@ class Link:
         spots = None        # the names of the face's touch spots, read again after a reboot and every 30 s
         spots_at = 0.0
         recent = []         # the last few head touches, to tell scritching from what each bit looks like
-        overwhelm = Overwhelm()
-        knobs = None
         kept_at = 0.0       # when the scritch face was last renewed under a hand that hasn't lifted
         head = None         # what the face says its head touches show, None if it doesn't
         uptime = None       # the robot's clock, and when it was read
@@ -936,10 +897,6 @@ class Link:
 
         while True:
             await asyncio.sleep(1.0)
-            o = self.settings["overwhelm"]
-            if knobs != o:       # the console changed them
-                knobs = dict(o)
-                overwhelm.after_ms, overwhelm.gap_ms, overwhelm.rest_ms = o["seconds"] * 1000, o["gap_seconds"] * 1000, o["rest_seconds"] * 1000
             try:
                 if uptime is None or time.monotonic() - read_at > 5:
                     async with self.http.get(f"{base}/status", headers=headers, timeout=ClientTimeout(total=4)) as r:
@@ -971,40 +928,24 @@ class Link:
                 if e["kind"] == "touch_spot" and e["index"] < len(spots):
                     e["spot"] = spots[e["index"]]
                 write(e)
-            recent = (recent + [e for e in events if e["kind"] in HEAD_KINDS])[-6:]
-            # overwhelm runs on the sensor's clock: every head touch, then a hand that hasn't lifted yet
-            tip = False
-            for e in events:
-                if e["kind"] in HEAD_KINDS:
-                    tip |= overwhelm.touch(e["t_ms"], e["t_ms"] + e["ms"], scritchy(e) or (overwhelm.running and scritching(recent)))
+            recent = label_scratching(events, recent)
             held = reader.open_touch()
-            if held:
-                tip |= overwhelm.touch(held[0], held[1], True, still_going=True)
+            self.hand = {"down": True, "from_ms": held[0], "to_ms": held[1]} if held else {"down": False}
             # only the last one: a burst shouldn't queue up a parade of faces
             react = None
             if events:
                 last = events[-1]
                 scritch = last["kind"] in HEAD_KINDS and (last["kind"] == "scritch" or scritching(recent))
                 react = reaction_for({"kind": "scritch"} if scritch else last, head)
-            elif held and overwhelm.running and time.monotonic() - kept_at > 2:
+            elif held and scritching(recent) and time.monotonic() - kept_at > 2:
                 # mid-scratch, the hand still down: keep the scritch face up rather than let it time out
                 react = reaction_for({"kind": "scritch"}, head)
             if react and react == reaction_for({"kind": "scritch"}, head):
                 kept_at = time.monotonic()
-            # earned, never by accident: not with a call open, not in work hours, not if it's switched off
-            wh = self.settings["work_hours"]
-            tipped = False
-            if tip and o["enabled"] and (head or {}).get("scritch") and self.device is None \
-                    and not work_hours(time.localtime(), (wh["start"], wh["end"]), wh["days"]):
-                asyncio.create_task(self.overwhelm(base, headers))
-                react = None
-                tipped = True
-            self.overwhelm_state = {"running": overwhelm.running, "progress": round(overwhelm.progress(), 3)}
             for e in events:
                 self.feed_seq += 1
                 self.feed.append({"seq": self.feed_seq, "t": time.time(), **e,
-                                  "showed": (react[0] if react else None) if e is events[-1] else None,
-                                  "overwhelmed": tipped and e is events[-1]})
+                                  "showed": (react[0] if react else None) if e is events[-1] else None})
             self.feed = self.feed[-300:]
             if react:
                 try:

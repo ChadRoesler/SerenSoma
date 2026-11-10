@@ -10,7 +10,7 @@ async function loadAbout() {
     ["Version", a.version], ["Up", ago(a.up_seconds)], ["Robot", a.robot], ["Tells it to call", a.advertise],
     ["Voice channel", a.channel_open ? (a.speaking ? "open, speaking" : a.deaf ? "open, not listening" : "open, listening") : "closed"],
     ["Night", a.night_now ? "on" : "off"],
-    ["Overwhelm", a.overwhelm && a.overwhelm.running ? `${Math.round(a.overwhelm.progress * 100)}%` : "nothing running"],
+    ["Hand on the head", a.hand && a.hand.down ? `yes, ${((a.hand.to_ms - a.hand.from_ms) / 1000).toFixed(1)} s so far` : "no"],
     ["State folder", a.state],
   ];
   $("facts").innerHTML = rows.map(([k, v]) => `<span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b>`).join("");
