@@ -18,7 +18,7 @@ dependencies = [
     "numpy>=1.24",
     "pyyaml>=6.0",
     # config blocks, token pointers, the viewer shell, enforce_server
-    "seren-meninges>=6.0.0,<7",
+    "seren-meninges>=6.1.0,<7",
 ]
 
 [project.optional-dependencies]

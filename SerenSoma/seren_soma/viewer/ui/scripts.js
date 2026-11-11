@@ -3,9 +3,7 @@ const $ = id => document.getElementById(id);
 function why(e) { return /^401/.test(e.message) ? "This page needs the body's token (🔑 Token, top right). It's the file 'token' in the state folder." : e.message; }
 function ago(s) { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; }
 
-async function loadAbout() {
-  let a;
-  try { a = await api("/api/about"); } catch (e) { $("facts").textContent = why(e); return; }
+function paintAbout(a) {
   const rows = [
     ["Version", a.version], ["Up", ago(a.up_seconds)], ["Robot", a.robot], ["Tells it to call", a.advertise],
     ["Voice channel", a.channel_open ? (a.speaking ? "open, speaking" : a.deaf ? "open, not listening" : "open, listening") : "closed"],
@@ -37,7 +35,7 @@ async function copyLogs() {
   }
 }
 
-document.addEventListener("DOMContentLoaded", () => { loadAbout(); setInterval(loadAbout, 5000); });
+document.addEventListener("DOMContentLoaded", () => { watch("/api/about", 5000, paintAbout, e => { $("facts").textContent = why(e); }); });
 
 // ── Set up and Firmware: this box's own routes ──────────────────────
 // Their own fetch: api() keeps only the status, and here the reason is the useful part
