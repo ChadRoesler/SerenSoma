@@ -2,12 +2,6 @@
   <div class="card">
     <h3>The body</h3>
     <div id="facts" class="facts muted">Looking…</div>
-    <h4>Voice channel</h4>
-    <label class="field"><span>Dead air</span><input type="range" id="deadAir" min="10" max="600" step="5">
-      <output id="deadAirOut" class="tiny"></output></label>
-    <p class="muted tiny">How long an open channel waits with no words before it hangs up. Takes effect on the next
-      silence; nothing restarts.</p>
-    <div class="msg tiny" id="deadAirMsg"></div>
     <p class="muted tiny">This page builds the body: setting the robot up, its firmware, and its log for whoever's
       helping. Touch and Servos are the hardware as it is: which pad answers where, and how the neck is
       running. Its faces, and what a touch means to it, are SerenPsycheion's.</p>
@@ -260,22 +254,54 @@
 
 <section class="view" id="voice">
   <div class="card">
-    <h3>Back and forth, timed</h3>
-    <div class="facts" id="vcFacts"></div>
-    <div class="key" id="vcKey"></div>
-    <table class="staged"><thead><tr><th>When</th><th>Turn</th><th>Where the time went</th><th class="num">Last word to first sound</th></tr></thead>
-      <tbody id="vcRows"></tbody></table>
-    <p class="muted tiny">Each thing heard and each thing said, newest first, with how long every leg took. No words are
-      kept here, only how many. A reply's bar starts when you stopped talking and ends at the robot's first sound:
-      waiting for enough quiet to be sure you'd finished, transcribing, whoever answers thinking, rendering the first
-      sentence into a voice, and opening the channel. A line is rendered a sentence at a time, so the wait is for
-      the first sentence, not the whole line.</p>
-    <h4>Quiet that ends a turn</h4>
-    <label class="field"><span>Quiet</span><input type="range" id="vcQuiet" min="300" max="2500" step="50">
+    <h3>Back and forth</h3>
+    <div class="row">
+      <select id="tkMinutes"><option value="10">10 minutes</option><option value="30" selected>30 minutes</option>
+        <option value="60">an hour</option><option value="120">two hours</option></select>
+      <button class="btn primary" id="tkOn">Start</button>
+      <button class="btn" id="tkOff">Stop</button>
+    </div>
+    <div class="facts" id="tkFacts"></div>
+    <p class="muted tiny">For that long the robot keeps listening without being tapped, opening its channel again
+      whenever it closes, and the voice is kept loaded so a reply doesn't wait for it to load (that wait was 40
+      seconds on 12 Nov). The microphone is open the whole time, which is why it always ends by itself. The dead-air
+      timer doesn't hang up while this is on. Start again to run longer.</p>
+    <div class="msg tiny" id="tkMsg"></div>
+  </div>
+
+  <div class="card">
+    <h3>The two timers</h3>
+    <p class="muted tiny">They sound alike and do different jobs. The first decides when <em>what you just said</em> is
+      finished; the second decides when <em>the whole conversation</em> is.</p>
+    <label class="field"><span>Quiet that ends a turn</span><input type="range" id="vcQuiet" min="300" max="2500" step="50">
       <output id="vcQuietOut" class="tiny"></output></label>
-    <p class="muted tiny">How long the room has to be quiet before what you said counts as finished. Every turn waits
-      this long before anything else starts, so shorter is snappier and cuts you off more when you pause to think.
-      Takes effect on the next thing you say.</p>
+    <p class="muted tiny">How long the room has to be quiet before what you said counts as finished and is sent to be
+      answered. Every turn waits this long before anything else starts, so this is the one that makes a reply land
+      sooner. Shorter is snappier, and cuts you off more when you pause to think. Takes effect on the next thing you
+      say.</p>
     <div class="msg tiny" id="vcMsg"></div>
+    <label class="field"><span>Dead air that hangs up</span><input type="range" id="deadAir" min="10" max="600" step="5">
+      <output id="deadAirOut" class="tiny"></output></label>
+    <p class="muted tiny">How long an open channel waits with no words at all before the robot stops listening, so a
+      forgotten tap can't leave the microphone open. It doesn't make a reply any quicker. Keep it longer than whoever
+      answers takes to think, or the robot hangs up while they're thinking and has to be woken again for the reply.
+      Takes effect on the next silence.</p>
+    <div class="msg tiny" id="deadAirMsg"></div>
+  </div>
+
+  <div class="card">
+    <h3>Each turn, timed</h3>
+    <div class="facts" id="vcFacts"></div>
+    <details id="vcLog">
+      <summary class="tiny" id="vcLogSummary">The turns</summary>
+      <div class="key" id="vcKey"></div>
+      <table class="staged"><thead><tr><th>When</th><th>Turn</th><th>Where the time went</th><th class="num">Last word to first sound</th></tr></thead>
+        <tbody id="vcRows"></tbody></table>
+      <p class="muted tiny">Each thing heard and each thing said, newest first, with how long every leg took. No words are
+        kept here, only how many. A reply's bar starts when you stopped talking and ends at the robot's first sound:
+        waiting for enough quiet to be sure you'd finished, transcribing, whoever answers thinking, rendering the first
+        sentence into a voice, and opening the channel. A line is rendered a sentence at a time, so the wait is for
+        the first sentence, not the whole line.</p>
+    </details>
   </div>
 </section>

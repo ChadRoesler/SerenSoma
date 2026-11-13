@@ -39,21 +39,29 @@ class VoiceClock:
             self._open = (self.seq, done, speech_end)
         return turn
 
+    def claim(self):
+        """Take the words nothing has answered yet, at the moment a reply is asked for. What is heard
+        after that, while the reply is still being rendered, waits for the next reply: until 12 Nov
+        2026 a reply was matched when it finished, and something said during a slow render made it
+        look like an instant answer to that."""
+        answering, self._open = self._open, None
+        return answering
+
     def said(self, *, asked: float, rendered_first: float, first_audio: float, done: float, pieces: int,
-             chars: int, audio_s: float, woke: bool = False, clip: bool = False) -> dict:
+             chars: int, audio_s: float, woke: bool = False, clip: bool = False, answering=None) -> dict:
         """asked: when the words arrived to be said. rendered_first: when the first piece was ready
-        to send. first_audio: when the first sound went to the robot. done: when the last did."""
+        to send. first_audio: when the first sound went to the robot. done: when the last did.
+        answering: what claim() gave when the reply was asked for."""
         self.seq += 1
         turn = {"seq": self.seq, "kind": "said", "t": time.time(), "pieces": pieces, "chars": chars,
                 "audio_s": round(audio_s, 1), "woke": woke, "clip": clip,
                 "render_first_ms": _ms(rendered_first - asked), "open_channel_ms": _ms(first_audio - rendered_first),
                 "to_first_sound_ms": _ms(first_audio - asked), "speaking_ms": _ms(done - first_audio)}
-        if self._open is not None and asked - self._open[1] <= ANSWER_WITHIN_S:
-            seq, words_ready, speech_end = self._open
+        if answering is not None and asked - answering[1] <= ANSWER_WITHIN_S:
+            seq, words_ready, speech_end = answering
             turn["answers"] = seq
             turn["mind_ms"] = _ms(asked - words_ready)
             turn["last_word_to_first_sound_ms"] = _ms(first_audio - speech_end)
-        self._open = None      # the first thing said after it is its answer; a second line isn't
         self.turns.append(turn)
         return turn
 

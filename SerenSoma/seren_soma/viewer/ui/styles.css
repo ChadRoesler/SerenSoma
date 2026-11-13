@@ -47,3 +47,4 @@ input[type=color] { width:44px; height:30px; padding:2px; background:var(--surfa
 .legs i { display:block; height:100%; }
 .key { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:12px; color:var(--text-dim); margin:6px 0; }
 .key i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; }
+details > summary { cursor:pointer; color:var(--text-dim); margin:6px 0; }

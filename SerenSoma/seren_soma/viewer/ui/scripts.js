@@ -688,7 +688,8 @@ function paintVoice(v) {
     ["Replies timed", String(replies.length)],
     ["Your last word to my first sound, typically", dur(mid("last_word_to_first_sound_ms"))],
     ...LEGS.map(([k, name]) => [`of that, ${name}`, mid(k) == null ? "–" : dur(mid(k))]),
-  ]) : `<span class="muted">Nothing timed yet.</span><b>Say something to the robot and have it answer.</b>`;
+  ]) : `<span class="muted">No reply timed yet.</span><b>${v.turns.length ? "Things were heard and said, but nothing was said in answer to something heard." : "Say something to the robot and have it answer."}</b>`;
+  $("vcLogSummary").textContent = `The turns, one by one (${v.turns.length})`;
   $("vcKey").innerHTML = LEGS.map(([, name], i) => `<span><i style="background:${hue(i)}"></i>${name}</span>`).join("");
   const bar = t => {
     const parts = LEGS.map(([k], i) => [t[k] || 0, i]).filter(([ms]) => ms > 0), total = parts.reduce((a, [ms]) => a + ms, 0) || 1;
@@ -723,8 +724,30 @@ async function loadQuiet() {
     } catch (e) { say("vcMsg", e.message, true); }
   };
 }
-function voiceOpen() { loadQuiet(); }
+function paintTalk(t) {
+  const left = t.on ? Math.max(0, Math.round((t.until * 1000 - Date.now()) / 60000)) : 0;
+  $("tkFacts").innerHTML = facts([
+    ["Back and forth", t.on ? `on, ${left} minute${left === 1 ? "" : "s"} left` : "off"],
+    ["The voice", t.on ? (t.voice === "held" ? "loaded and held" : t.voice || "being loaded...") : "put away when idle, as usual"],
+    ["The robot", t.channel_open ? (t.listening ? "listening" : "channel open, not listening right now") : "channel closed"],
+  ]);
+}
+async function setTalk(body) {
+  try { paintTalk(await (await post("/talk", body)).json()); say("tkMsg", ""); }
+  catch (e) { say("tkMsg", e.message, true); }
+}
+function voiceOpen() { loadQuiet(); loadDeadAir(); }
+// whether the list of turns is open is the reader's choice, and is remembered
+function keepLogOpen() {
+  const log = $("vcLog");
+  try { log.open = localStorage.getItem("soma_turns_open") === "1"; } catch (e) { /* no storage: it starts closed */ }
+  log.addEventListener("toggle", () => { try { localStorage.setItem("soma_turns_open", log.open ? "1" : "0"); } catch (e) { /* fine */ } });
+}
 
 document.addEventListener("DOMContentLoaded", () => {
   watch(() => showing("voice") && "/api/voice-timing", 2000, paintVoice, e => { $("vcFacts").textContent = why(e); });
+  watch(() => showing("voice") && "/talk", 2000, paintTalk, e => { $("tkFacts").textContent = why(e); });
+  keepLogOpen();
+  $("tkOn").onclick = () => setTalk({ minutes: Number($("tkMinutes").value) });
+  $("tkOff").onclick = () => setTalk({ on: false });
 });

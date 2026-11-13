@@ -34,8 +34,10 @@ def test_a_line_splits_at_its_sentences_and_the_first_stays_short():
 def test_the_first_thing_said_after_words_is_their_answer_and_carries_the_whole_gap():
     c = VoiceClock()
     c.heard(speech_end=10.0, detected=10.9, done=11.4, audio_s=2.0, words=5, transcribed=True)
-    first = c.said(asked=13.4, rendered_first=14.0, first_audio=14.1, done=16.0, pieces=2, chars=40, audio_s=1.9)
-    second = c.said(asked=17.0, rendered_first=17.5, first_audio=17.5, done=18.0, pieces=1, chars=9, audio_s=0.5)
+    first = c.said(asked=13.4, rendered_first=14.0, first_audio=14.1, done=16.0, pieces=2, chars=40, audio_s=1.9,
+                   answering=c.claim())
+    second = c.said(asked=17.0, rendered_first=17.5, first_audio=17.5, done=18.0, pieces=1, chars=9, audio_s=0.5,
+                    answering=c.claim())
     heard = c.recent()[0]
     assert (heard["wait_for_quiet_ms"], heard["transcribe_ms"]) == (900, 500)
     assert (first["answers"], first["mind_ms"], first["render_first_ms"], first["last_word_to_first_sound_ms"]) == (1, 2000, 600, 4100)
@@ -45,7 +47,19 @@ def test_the_first_thing_said_after_words_is_their_answer_and_carries_the_whole_
 def test_a_clip_with_no_words_is_timed_but_nothing_answers_it():
     c = VoiceClock()
     c.heard(speech_end=1.0, detected=1.9, done=2.2, audio_s=1.0, words=0, transcribed=True)
-    assert "answers" not in c.said(asked=3.0, rendered_first=3.2, first_audio=3.3, done=4.0, pieces=1, chars=5, audio_s=0.7)
+    assert "answers" not in c.said(asked=3.0, rendered_first=3.2, first_audio=3.3, done=4.0, pieces=1, chars=5, audio_s=0.7,
+                                   answering=c.claim())
+
+
+def test_words_heard_while_a_reply_is_rendering_wait_for_the_next_reply():
+    c = VoiceClock()
+    c.heard(speech_end=10.0, detected=10.9, done=11.4, audio_s=2.0, words=5, transcribed=True)
+    answering = c.claim()                                # the reply is asked for at 13.4...
+    c.heard(speech_end=30.0, detected=30.9, done=31.4, audio_s=1.0, words=3, transcribed=True)   # ...and is slow
+    slow = c.said(asked=13.4, rendered_first=37.0, first_audio=37.5, done=40.0, pieces=1, chars=9, audio_s=2.5, answering=answering)
+    nxt = c.said(asked=45.0, rendered_first=45.5, first_audio=45.6, done=47.0, pieces=1, chars=9, audio_s=1.4, answering=c.claim())
+    assert (slow["answers"], slow["mind_ms"], slow["last_word_to_first_sound_ms"]) == (1, 2000, 27500)
+    assert nxt["answers"] == 2 and nxt["mind_ms"] == 13600
 
 
 # -- the settings --------------------------------------------------------------------------------
@@ -190,3 +204,82 @@ def test_what_was_heard_reaches_whoever_is_waiting_the_moment_its_transcribed(tm
     heard = [t for t in timing["turns"] if t["kind"] == "heard"]
     assert len(heard) == 2 and heard[0]["words"] == 5 and heard[0]["wait_for_quiet_ms"] == 900
     assert "combo" not in json.dumps(timing)
+
+
+# -- back and forth ------------------------------------------------------------------------------
+
+def _with_speaker(tmp_path, go):
+    """A pretend Lodestar that keeps a book of who holds the speaker; go(client, auth, link, book)."""
+    book = []
+
+    async def ensure(request):
+        body = await request.json()
+        book.append(("ensure", body["holder"], body["ttl_seconds"]))
+        return web.json_response({"ok": True, "ready": True})
+
+    async def release(request):
+        book.append(("release", (await request.json())["holder"]))
+        return web.json_response({"ok": True})
+
+    async def run():
+        lodestar = web.Application()
+        lodestar.router.add_post("/api/v1/service/speaker/ensure", ensure)
+        lodestar.router.add_post("/api/v1/service/speaker/release", release)
+        async with TestServer(lodestar) as ls:
+            y = tmp_path / "soma.yaml"
+            y.write_text(f"state_dir: {str(tmp_path / 'state').replace(chr(92), '/')}\nadvertise: 10.0.0.2\n"
+                         "robot:\n  url: http://127.0.0.1:9\n  token: r\n"
+                         f"lodestar:\n  url: {str(ls.make_url('')).rstrip('/')}\n  token: t\n", encoding="utf-8")
+            link = voice.Link(load_config(str(y)).runtime())
+            async with TestClient(TestServer(voice.make_app(link))) as client:
+                return await go(client, {"Authorization": f"Bearer {link.token}"}, link, book)
+    return asyncio.run(run())
+
+
+def test_back_and_forth_holds_the_voice_in_its_own_name_and_lets_it_go_when_turned_off(tmp_path):
+    async def go(client, auth, link, book):
+        off = await (await client.get("/talk", headers=auth)).json()
+        bad = await client.post("/talk", headers=auth, json={"minutes": 0})
+        on = await (await client.post("/talk", headers=auth, json={"minutes": 30})).json()
+        await asyncio.sleep(0.4)
+        during = await (await client.get("/talk", headers=auth)).json()
+        held_dead_air = link.talking()
+        stopped = await (await client.post("/talk", headers=auth, json={"on": False})).json()
+        await asyncio.sleep(0.3)
+        unasked = await client.post("/talk", json={"minutes": 5})
+        return off, bad.status, on, during, held_dead_air, stopped, unasked.status, list(book)
+    off, bad, on, during, held, stopped, unasked, book = _with_speaker(tmp_path, go)
+    assert off["on"] is False and bad == 400 and unasked == 401
+    assert on["on"] is True and during["voice"] == "held" and held is True
+    assert stopped["on"] is False
+    assert book[0] == ("ensure", voice.TALK_HOLDER, voice.TALK_LEASE_S) and book[-1] == ("release", voice.TALK_HOLDER)
+    assert voice.TALK_HOLDER != "seren-voice"      # /speak drops its own lease after every line; ours must outlive that
+
+
+def test_stopping_back_and_forth_closes_the_microphone_at_once(tmp_path):
+    async def go(client, auth, link, book):
+        await client.post("/talk", headers=auth, json={"minutes": 30})
+        robot = await client.ws_connect("/voice", headers={"Authorization": f"Bearer {link.device_token}", "Device-Id": "test"})
+        await robot.send_str(json.dumps({"type": "hello"}))
+        await robot.receive_json()
+        open_before = (await (await client.get("/talk", headers=auth)).json())["channel_open"]
+        started = time.monotonic()
+        await client.post("/talk", headers=auth, json={"on": False})
+        closed = await asyncio.wait_for(robot.receive(), 5)
+        return open_before, closed.type, time.monotonic() - started
+    open_before, closed, took = _with_speaker(tmp_path, go)
+    assert open_before is True
+    assert closed in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED) and took < 2    # not after the dead-air timer
+
+
+def test_tapping_the_robot_off_ends_back_and_forth_rather_than_being_undone(tmp_path):
+    async def go(client, auth, link, book):
+        await client.post("/talk", headers=auth, json={"minutes": 30})
+        robot = await client.ws_connect("/voice", headers={"Authorization": f"Bearer {link.device_token}", "Device-Id": "test"})
+        await robot.send_str(json.dumps({"type": "hello"}))
+        await robot.receive_json()
+        await robot.close()                      # the tap: the robot hangs up, cleanly
+        await asyncio.sleep(0.5)
+        return (await (await client.get("/talk", headers=auth)).json())["on"], list(book)
+    on, book = _with_speaker(tmp_path, go)
+    assert on is False and book[-1] == ("release", voice.TALK_HOLDER)

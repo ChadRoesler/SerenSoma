@@ -133,6 +133,14 @@ MAX_UTTERANCE_S = 20
 # rendered and a moment of quiet transcribed, and both are loaded by the time anyone speaks.
 WARM_AFTER_S = 90
 WARM_LINE = "Okay."
+# Back and forth: for a while, the robot keeps listening and the voice stays loaded, so a reply is a
+# second away and the next thing said needs no tap. The voice is kept up with a lease on the speech
+# service's speaker, in a name of its own: /speak takes and drops a lease in its caller's name on every
+# line, and dropping ours with it would put the voice away between lines.
+TALK_HOLDER = "seren-soma-talk"
+TALK_LEASE_S = 150        # how long the speaker stays held if this server dies mid-conversation
+TALK_RENEW_S = 45
+TALK_MINUTES = (1, 180)
 
 # A clip whose transcript is nothing but sound tags, like "(keyboard clacking)" or "[music]".
 SOUND_TAGS = re.compile(r"^(?:\s|[.,!?…♪-]|\([^)]*\)|\[[^\]]*\]|\*[^*]*\*)*$")
@@ -255,6 +263,8 @@ class Device:
         self.ready = False                  # its hello has been answered
         self.deaf = False                   # opened by me to say something: what the mic hears is dropped
         self.last_words = time.monotonic()  # the channel hangs up after too long without any
+        self.hang_up = False                # asked to close: done as soon as nothing is being said
+        self.closed_here = False            # this end closed the channel, not the robot
         self.ended_quiet_ms = 0
         self.reset()
 
@@ -333,6 +343,10 @@ class Link:
         self.heard_recent = []      # what was heard since this server started, for GET /heard
         self.heard_event = asyncio.Event()  # set, and replaced, each time something is heard
         self.speech_used = 0.0      # when the speech service last rendered or transcribed for us (monotonic)
+        self.talk_until = 0.0       # back and forth is on until this time (wall clock); 0 is off
+        self.talk_task = None
+        self.talk_voice = ""        # what holding the voice last came to: "held", or why not
+        self.wake_deaf = True       # a channel this server opens is deaf, unless it's opened to listen
         HEARD_DIR.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -428,14 +442,21 @@ class Link:
             d.last_words = time.monotonic()
             await self.send(d, {"type": "stt", "text": text})
 
+    async def hang_up(self, d: Device):
+        """Close the channel from this end, and remember it was this end: a close that wasn't is the
+        person tapping the robot to stop it listening."""
+        d.closed_here = True
+        await d.ws.close()
+
     async def send(self, d: Device, message: dict):
         await d.ws.send_str(json.dumps({"session_id": d.session_id, **message}))
 
-    async def wake_device(self):
+    async def wake_device(self, deaf: bool = True):
         """Open the channel from this end. It stays deaf, and hangs up after the line: I can get
-        someone's attention without the mic listening to a room nobody opened it in."""
+        someone's attention without the mic listening to a room nobody opened it in. deaf=False is
+        for back and forth, which the person turned on: there the point is that it listens."""
         headers = self.robot_headers()
-        self.waking = True
+        self.waking, self.wake_deaf = True, deaf
         try:
             async with self.http.post(f"http://{self.args.device}:8080/api/wake", headers=headers, data=b"{}",
                                       timeout=ClientTimeout(total=6)) as r:
@@ -447,7 +468,94 @@ class Link:
                     raise web.HTTPGatewayTimeout(text="the robot didn't open its channel")
                 await asyncio.sleep(0.1)
         finally:
-            self.waking = False
+            self.waking, self.wake_deaf = False, True
+
+    # -- back and forth ---------------------------------------------------------------------
+
+    def talking(self) -> bool:
+        return time.time() < self.talk_until
+
+    async def _speaker(self, what: str, body: dict) -> dict:
+        async with self.http.post(f"{self.lodestar_url}/api/v1/service/speaker/{what}", headers=self.lodestar_headers(),
+                                  json=body, timeout=ClientTimeout(total=260)) as r:
+            answer = await r.json(content_type=None)
+            return answer if isinstance(answer, dict) else {"error": f"{r.status} {str(answer)[:120]}"}
+
+    async def keep_talking(self):
+        """While back and forth is on: hold the voice loaded, and open the channel again, listening,
+        whenever it has closed. When it ends, by the clock or by being turned off, let the voice go."""
+        renew_at = 0.0
+        try:
+            while self.talking():
+                if time.monotonic() >= renew_at:
+                    renew_at = time.monotonic() + TALK_RENEW_S
+                    try:
+                        held = await self._speaker("ensure", {"holder": TALK_HOLDER, "reason": "back and forth through the robot",
+                                                              "wait_seconds": 240, "ttl_seconds": TALK_LEASE_S})
+                        self.talk_voice = "held" if held.get("ready") else (held.get("error") or "the speaker didn't come up")
+                    except Exception as e:  # noqa: BLE001 - talk goes on with a cold voice rather than not at all
+                        self.talk_voice = f"couldn't reach the speech service: {e or type(e).__name__}"
+                    if self.talk_voice != "held":
+                        log.info("back and forth: the voice isn't held: %s", self.talk_voice)
+                if self.device is None and not self.waking and not self.say_lock.locked() and not self.saying:
+                    try:
+                        await self.wake_device(deaf=False)
+                    except Exception as e:  # noqa: BLE001 - the robot is off or busy: try again shortly
+                        log.info("back and forth: couldn't open the channel: %s", getattr(e, "text", None) or e)
+                        await asyncio.sleep(8)
+                await asyncio.sleep(2)
+        finally:
+            self.talk_until = 0.0
+            self.talk_voice = ""
+            try:
+                await asyncio.shield(self._speaker("release", {"holder": TALK_HOLDER}))
+            except BaseException:  # noqa: BLE001 - the lease runs out by itself in TALK_LEASE_S
+                pass
+            log.info("back and forth: off")
+
+    def talk_state(self) -> dict:
+        d = self.device
+        return {"on": self.talking(), "until": self.talk_until if self.talking() else None, "voice": self.talk_voice,
+                "channel_open": d is not None, "listening": bool(d and not d.deaf and not d.speaking),
+                "minutes_range": list(TALK_MINUTES)}
+
+    async def talk_get(self, request):
+        self.authorized(request)
+        return web.json_response(self.talk_state())
+
+    async def talk_post(self, request):
+        """POST /talk {"minutes": 30} turns back and forth on for that long (again, to extend it);
+        {"on": false} turns it off. While it's on the robot's microphone is open: that is the point,
+        and why it always has an end."""
+        self.authorized(request)
+        try:
+            body = await request.json()
+        except ValueError:
+            raise web.HTTPBadRequest(text="expected JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="expected a JSON object")
+        if body.get("on") is False:
+            if self.talk_task is not None:
+                self.talk_task.cancel()
+                self.talk_task = None
+            self.talk_until = 0.0
+            # Stop means the microphone stops, now. Until 13 Nov 2026 it only handed the channel back to
+            # the dead-air timer, and in a room with any talk in it that timer never runs out.
+            d = self.device
+            if d is not None:
+                d.hang_up = True                   # for a line still being spoken: closed as soon as it ends
+                if not d.speaking and not self.saying:
+                    await self.hang_up(d)
+            return web.json_response(self.talk_state())
+        minutes = body.get("minutes")
+        lo, hi = TALK_MINUTES
+        if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not lo <= minutes <= hi:
+            raise web.HTTPBadRequest(text=f'expected {{"minutes": {lo} to {hi}}}, or {{"on": false}}')
+        self.talk_until = time.time() + minutes * 60
+        if self.talk_task is None or self.talk_task.done():
+            self.talk_task = asyncio.create_task(self.keep_talking())
+        log.info("back and forth: on for %s minutes", minutes)
+        return web.json_response(self.talk_state())
 
     async def say(self, text: str, voice: str, emotion: str | None, wake: bool = False, wav: bytes | None = None,
                   whole: bool = False):
@@ -464,6 +572,7 @@ class Link:
         line. whole: render it in one piece (one breath, the tone carried right through), and wait
         for all of it. A saved clip is already rendered and is one piece."""
         asked = time.monotonic()
+        answering = self.clock.claim()    # what this is a reply to, if anything: decided now, not when it's done
         pieces = [text] if (wav is not None or whole) else split_sentences(text)
         ready: asyncio.Queue = asyncio.Queue()    # each piece's packets in order, then None; or what went wrong
 
@@ -533,11 +642,12 @@ class Link:
                         d.last_words = time.monotonic() - max(0, self.dead_air - REPLY_WINDOW_S)
                     else:
                         await asyncio.sleep(0.5)    # the tail of the audio, still in the device's queue
-                        await d.ws.close()
+                        await self.hang_up(d)
             if first_audio is not None:
                 turn = self.clock.said(asked=asked, rendered_first=rendered_first, first_audio=first_audio,
                                        done=time.monotonic(), pieces=len(pieces), chars=len(text),
-                                       audio_s=sent * FRAME_MS / 1000, woke=woke, clip=wav is not None)
+                                       audio_s=sent * FRAME_MS / 1000, woke=woke, clip=wav is not None,
+                                       answering=answering)
                 log.info("said %s piece(s), %.1fs: first sound %d ms after the words arrived%s", len(pieces), turn["audio_s"],
                          turn["to_first_sound_ms"],
                          f", {turn['last_word_to_first_sound_ms']} ms after he stopped talking" if "answers" in turn else "")
@@ -835,7 +945,7 @@ class Link:
         ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024, heartbeat=None)
         await ws.prepare(request)
         d = Device(ws, secrets.token_hex(4))
-        d.deaf = self.waking      # set before anything can arrive from this device
+        d.deaf = self.waking and self.wake_deaf      # set before anything can arrive from this device
         self.device = d
         log.info("device connected: %s", request.headers.get("Device-Id", "?"))
         asyncio.create_task(self.warm())
@@ -855,6 +965,15 @@ class Link:
             if self.device is d:
                 self.device = None
             log.info("device gone")
+            # The robot hung up, cleanly, and nobody here asked it to: someone tapped it to stop it
+            # listening. Back and forth would have it listening again in two seconds, so that tap ends
+            # back and forth too. A dropped connection isn't a clean close, and is reopened as before.
+            if self.talking() and not d.closed_here and ws.close_code in (1000, 1001):
+                log.info("back and forth: the robot was tapped off, so it stops")
+                self.talk_until = 0.0
+                if self.talk_task is not None:
+                    self.talk_task.cancel()
+                    self.talk_task = None
         return ws
 
     async def on_json(self, d: Device, m: dict):
@@ -1123,11 +1242,15 @@ class Link:
         while True:
             await asyncio.sleep(1.0)
             d = self.device
-            if d is None or d.speaking or self.saying or self.say_lock.locked():
+            if d is not None and d.hang_up and not (d.speaking or self.saying or self.say_lock.locked()):
+                log.info("closing the channel: back and forth was stopped")
+                await self.hang_up(d)
+                continue
+            if d is None or d.speaking or self.saying or self.say_lock.locked() or self.talking():
                 continue
             if time.monotonic() - d.last_words >= self.dead_air:
                 log.info("no words for %ss: closing the channel", self.dead_air)
-                await d.ws.close()
+                await self.hang_up(d)
 
     async def on_start(self, app):
         self.http = ClientSession()
@@ -1139,6 +1262,9 @@ class Link:
         self.touch_task.cancel()
         self.silence_task.cancel()
         self.night_task.cancel()
+        if self.talk_task is not None:
+            self.talk_task.cancel()
+            await asyncio.gather(self.talk_task, return_exceptions=True)    # it lets the voice go on its way out
         await self.http.close()
 
 
@@ -1167,6 +1293,8 @@ def make_app(link: "Link", viewer_html: str = "") -> web.Application:
     app.router.add_get("/api/about", link.about)
     app.router.add_get("/api/logs", link.logs)
     app.router.add_get("/heard", link.heard_route)
+    app.router.add_get("/talk", link.talk_get)
+    app.router.add_post("/talk", link.talk_post)
     app.router.add_get("/api/voice-timing", link.voice_timing)
     Bench(link, STATE).add_routes(app)
     if viewer_html:
