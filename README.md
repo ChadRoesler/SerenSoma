@@ -33,7 +33,7 @@ All of it lives in the voice server's state folder, `~/seren-soma/state/` by def
 
 | | |
 |---|---|
-| [`firmware/`](firmware/) | The robot's firmware, ESP-IDF 6.1 on the CoreS3. Sprite faces, the token-guarded control API, the light rails, the head sensor, sending a face over Wi-Fi. [`firmware/docs/custom-faces.md`](firmware/docs/custom-faces.md) is the face format. |
+| [`firmware/`](firmware/) | The robot's firmware, ESP-IDF 6.1 on the CoreS3. Sprite faces, the token-guarded control API, the light rails, the head sensor, sending a face over Wi-Fi. [`firmware/docs/custom-faces.md`](firmware/docs/custom-faces.md) is the face format; [`firmware/docs/bench.md`](firmware/docs/bench.md) is how touch gets from the pad to the face, and the bench for charting the pads and testing the neck. |
 | [`SerenSoma/`](SerenSoma/) | `seren-soma`, the nervous system, as a Python package. Speaks the robot's voice protocol, hears through the speech service, reads the head sensor into strokes, pokes, scritches and resting hands, and turns them into faces. Owns night mode and work hours. |
 | `firmware/tools/` | `emotion_cycle.py`: walk the robot through every emotion, to check a face on the real screen. Making faces (Face Studio, `face.py`) moved to [SerenPsycheion](https://github.com/ChadRoesler/SerenPsycheion) on 9 Nov 2026. |
 
@@ -76,7 +76,7 @@ calls from anything on the network, and says so in its boot log.
 | `POST /api/sound` | Play one of the face's own sounds (`snd_<name>.ogg` from the card), on the robot itself. `GET /api/touch-spots` lists them. |
 | `POST /api/config` | The `soma.yaml` keys over the network (Wi-Fi, voice server, token, tailnet), saved, never echoed back. `reboot: true` to apply them. |
 | `POST /api/settings` | Read, or save, the master light dimmer, speaker volume and screen brightness (all 0 to 100; saved on the robot). `night` puts a cap over them that is never saved. |
-| `POST /api/emotion`, `/api/react` | A pose, or a pose for a moment. `rest: true` makes a pose the one the robot goes back to. |
+| `POST /api/emotion`, `/api/react` | A pose, or a pose for a moment. `rest: true` makes a pose the one the robot goes back to. `hold: true` holds a pose against everything (touches, reacts, replies) until `hold: false`, for trying one out. |
 | `POST /api/leds`, `/api/led` | Light the rails, per LED or all at once. |
 | `GET /api/touch-raw`, `/api/touch-spots` | The head sensor's readings; the face's touch spots and head touches. |
 | `POST /api/face`, `/api/face-restore`, `/api/reboot` | Send a face (it goes in on the next boot), or swap back to the one before it. |

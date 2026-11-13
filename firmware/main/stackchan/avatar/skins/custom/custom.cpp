@@ -344,6 +344,25 @@ int CustomAvatar::addNamedDecorator(const std::string& name, uint32_t lifetimeMs
 
 bool CustomAvatar::setEmotionByName(const std::string& emotion)
 {
+    // held: it's handled, by not happening. True, so the caller doesn't fall back to the six-pose enum.
+    if (_held) {
+        return true;
+    }
+    return applyPose(emotion);
+}
+
+void CustomAvatar::setHeld(bool held)
+{
+    _held = held;
+    if (held && _react_timer != nullptr) {
+        // a react that was showing would otherwise come back for its pose after the hold is let go
+        lv_timer_delete(_react_timer);
+        _react_timer = nullptr;
+    }
+}
+
+bool CustomAvatar::applyPose(const std::string& emotion)
+{
     if (!_valid) {
         return false;
     }
@@ -572,7 +591,7 @@ int CustomAvatar::spotAt(int x, int y, const char* gesture) const
 
 void CustomAvatar::react(const std::string& emotion, uint32_t ms)
 {
-    if (_manifest.pose(emotion) == nullptr) {
+    if (_held || _manifest.pose(emotion) == nullptr) {
         return;
     }
     // boop twice and the second one goes back to the same place as the first
@@ -652,6 +671,9 @@ void CustomAvatar::tickMotion(uint32_t nowMs)
 
 void CustomAvatar::setEmotion(const Emotion& emotion)
 {
+    if (_held) {
+        return;  // a stroke's happy face, and what it puts back after
+    }
     if (setEmotionByName(enum_emotion_name(emotion))) {
         _emotion = emotion;
         return;

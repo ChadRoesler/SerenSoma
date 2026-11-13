@@ -20,6 +20,11 @@
  *                     "night": {"dimmer","volume","brightness"} caps them until "night": null. Never saved.
  *   POST /api/emotion {"name":"sleepy","rest":true} also makes it the pose to return to in place of neutral,
  *                     until the next /api/emotion without "rest"
+ *   POST /api/emotion {"name":"happy","hold":true} shows it and holds it: until {"hold":false} arrives, no
+ *                     touch, react, stroke, reply or neutral changes the pose, and the tries below stay
+ *                     on it. While one is held an /api/emotion with no "hold" is refused (409), so a
+ *                     hold is only ever let go on purpose. {"name":"neutral","hold":false} lets go.
+ *                     /api/status says "held": the pose. Never saved: a reboot lets go.
  *   POST /api/emotion {"name":"happy"} and optionally, to try things out without sending a face:
  *                     "lights":[r,g,b], "lightsPulse":ms, "mouthCycle":ms, "roll":ms,
  *                     "look":{"left":[x,y],"right":[x,y]}, "brow":{"left":[y,tilt],"right":[y,tilt]}
@@ -35,6 +40,8 @@
  *   POST /api/react   {"name":"laughing","ms":2000}: show a pose for a moment, then go back
  *   POST /api/twitch  {"eye":"right","lid":"closed","every":[2500,6000],"flutters":3}, or {"off":true}
  *                     tries a twitch on the current pose, until the next emotion
+ *   GET/POST /api/touch-probe, GET/POST /api/servo, GET /api/screen-touch: the bench, described
+ *                     where they're defined
  *
  * Anything touching the avatar or motion runs under LvglLockGuard: the
  * StackChan update task owns those on core 1 and will corrupt without it.
@@ -308,6 +315,7 @@ esp_err_t handle_status(httpd_req_t* req)
                 custom->rigState(rig, sizeof(rig));
                 cJSON_AddStringToObject(root, "rig", rig);
                 cJSON_AddStringToObject(root, "resting", custom->resting().c_str());
+                cJSON_AddStringToObject(root, "held", custom->heldPose().c_str());
             }
         }
     }
@@ -493,6 +501,9 @@ esp_err_t handle_emotion(httpd_req_t* req)
         pairOf(brow, "right", -3600, 3600, browR[0], browR[1]);
     }
     const bool rest      = cJSON_IsTrue(cJSON_GetObjectItem(body, "rest"));
+    const cJSON* holdKey = cJSON_GetObjectItem(body, "hold");
+    const bool holdSaid  = cJSON_IsBool(holdKey);
+    const bool hold      = cJSON_IsTrue(holdKey);
     const int askedCycle = json_int(body, "mouthCycle", 0);
     const int mouthCycle = askedCycle > 0 ? uitk::clamp(askedCycle, 300, 20000) : 0;
     const int askedRoll  = json_int(body, "roll", 0);
@@ -504,6 +515,15 @@ esp_err_t handle_emotion(httpd_req_t* req)
         auto& stackchan = GetStackChan();
         if (stackchan.hasAvatar()) {
             if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                if (custom->held() && !holdSaid) {
+                    cJSON* refused = cJSON_CreateObject();
+                    cJSON_AddBoolToObject(refused, "ok", false);
+                    cJSON_AddStringToObject(refused, "error",
+                                            "a pose is held; send \"hold\": false to let go, or \"hold\": true to hold this one instead");
+                    cJSON_AddStringToObject(refused, "held", custom->heldPose().c_str());
+                    return send_json(req, refused, "409 Conflict");
+                }
+                custom->setHeld(false);  // so the pose below can be set; held again after, if asked
                 custom->setResting(rest ? emotion : "");
             }
         }
@@ -530,11 +550,24 @@ esp_err_t handle_emotion(httpd_req_t* req)
         }
     }
 
-    mclog::tagInfo(_tag, "emotion: {}", emotion);
+    bool held = false;
+    if (hold) {
+        LvglLockGuard lock;
+        auto& stackchan = GetStackChan();
+        if (stackchan.hasAvatar()) {
+            if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
+                custom->setHeld(true);
+                held = true;
+            }
+        }
+    }
+
+    mclog::tagInfo(_tag, "emotion: {}{}", emotion, held ? " (held)" : "");
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "ok", true);
     cJSON_AddStringToObject(root, "emotion", emotion.c_str());
+    cJSON_AddBoolToObject(root, "held", held);
     return send_json(req, root);
 }
 
@@ -608,17 +641,20 @@ esp_err_t handle_react(httpd_req_t* req)
     const std::string pose = name->valuestring;
     const int ms           = uitk::clamp(json_int(body, "ms", 2000), 200, 15000);
     cJSON_Delete(body);
+    bool held = false;
     {
         LvglLockGuard lock;
         auto& stackchan = GetStackChan();
         if (stackchan.hasAvatar()) {
             if (auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar())) {
-                custom->react(pose, ms);
+                held = custom->held();
+                custom->react(pose, ms);  // does nothing while a pose is held
             }
         }
     }
     cJSON* root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "held", held);  // true: a pose is held, so this one wasn't shown
     return send_json(req, root);
 }
 
@@ -768,6 +804,242 @@ esp_err_t handle_touch_raw(httpd_req_t* req)
     const esp_err_t err = httpd_resp_send(req, text, used);
     heap_caps_free(text);
     return err;
+}
+
+/*
+ * The bench: the touch chip and the servos as they are, for charting the pads and testing the neck.
+ *
+ * GET  /api/touch-probe  every one of the chip's 12 channels right now (the head's gestures read
+ *                        three), and the sensitivity, control and channel-hold registers as it holds them
+ * POST /api/touch-probe  {"type":"low"|"high","level":0..7} changes the sensitivity until the next
+ *                        boot, then answers as GET does
+ * GET  /api/servo        each servo's own account: raw position, load, current, voltage, temperature,
+ *                        torque, its zero and the limits in force
+ * POST /api/servo        any of "lock": true (nothing else moves the head: no idle motion, no nod
+ *                        when petted), "hold": true (torque stays on at rest), "torque": false (let go
+ *                        now, to turn the head by hand and read where it is). Then answers as GET.
+ *                        None of that is saved. Picking the robot up clears "lock": the IMU owns it too.
+ *                        {"servo":"yaw"|"pitch","zero":"here"|"default"} is the one thing that IS saved:
+ *                        where that servo is now becomes its 0 degrees (or the build's default does),
+ *                        the same as the setup menu's home position, one servo at a time.
+ */
+esp_err_t send_touch_probe(httpd_req_t* req)
+{
+    touch_bench::Probe_t p{};
+    if (!touch_bench::probe(p)) {
+        return send_error(req, "503 Service Unavailable", "the touch chip didn't answer");
+    }
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "uptimeMs", static_cast<double>(esp_timer_get_time() / 1000));
+    cJSON* channels = cJSON_AddArrayToObject(root, "channels");
+    for (uint8_t c : p.channels) {
+        cJSON_AddItemToArray(channels, cJSON_CreateNumber(c));
+    }
+    cJSON* s = cJSON_AddObjectToObject(root, "sensitivity");
+    cJSON_AddStringToObject(s, "type", p.high ? "high" : "low");
+    cJSON_AddNumberToObject(s, "level", p.level);
+    cJSON* regs = cJSON_AddArrayToObject(s, "registers");
+    for (uint8_t r : p.sensitivity) {
+        cJSON_AddItemToArray(regs, cJSON_CreateNumber(r));
+    }
+    cJSON_AddNumberToObject(root, "ctrl1", p.ctrl1);
+    cJSON_AddNumberToObject(root, "ctrl2", p.ctrl2);
+    cJSON* hold = cJSON_AddArrayToObject(root, "hold");
+    cJSON_AddItemToArray(hold, cJSON_CreateNumber(p.hold[0]));
+    cJSON_AddItemToArray(hold, cJSON_CreateNumber(p.hold[1]));
+    return send_json(req, root);
+}
+
+esp_err_t handle_touch_probe(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    return send_touch_probe(req);
+}
+
+esp_err_t handle_touch_tune(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body = read_body(req);
+    if (body == nullptr) {
+        return send_error(req, "400 Bad Request", "expected {\"type\":\"low\"|\"high\",\"level\":0..7}");
+    }
+    const cJSON* type = cJSON_GetObjectItem(body, "type");
+    const bool high   = cJSON_IsString(type) && std::strcmp(type->valuestring, "high") == 0;
+    const bool low    = cJSON_IsString(type) && std::strcmp(type->valuestring, "low") == 0;
+    const int level   = json_int(body, "level", -1);
+    cJSON_Delete(body);
+    if (!(high || low) || level < 0 || level > 7) {
+        return send_error(req, "400 Bad Request", "expected {\"type\":\"low\"|\"high\",\"level\":0..7}");
+    }
+    if (!touch_bench::set_sensitivity(high, level)) {
+        return send_error(req, "503 Service Unavailable", "the touch chip didn't take it");
+    }
+    return send_touch_probe(req);
+}
+
+/*
+ * GET /api/screen-touch  the finger on the screen right now, as the touch driver reports it, and the
+ *                        last 16 touches the face saw: where each began and ended and what it was
+ *                        read as. For checking the screen against where a finger really is.
+ */
+esp_err_t handle_screen_touch(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "uptimeMs", static_cast<double>(esp_timer_get_time() / 1000));
+    bool down = false;
+    lv_point_t at{};
+    int width = 0, height = 0;
+    {
+        LvglLockGuard lock;
+        if (lv_display_t* display = lv_display_get_default()) {
+            width  = lv_display_get_horizontal_resolution(display);
+            height = lv_display_get_vertical_resolution(display);
+        }
+        for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev != nullptr; indev = lv_indev_get_next(indev)) {
+            if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER && lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) {
+                lv_indev_get_point(indev, &at);
+                down = true;
+                break;
+            }
+        }
+    }
+    cJSON_AddNumberToObject(root, "width", width);
+    cJSON_AddNumberToObject(root, "height", height);
+    cJSON_AddBoolToObject(root, "down", down);
+    if (down) {
+        cJSON_AddNumberToObject(root, "x", at.x);
+        cJSON_AddNumberToObject(root, "y", at.y);
+    }
+    screen_touch::Touch_t kept[screen_touch::kKept];
+    const int n    = screen_touch::recent(kept);
+    cJSON* touches = cJSON_AddArrayToObject(root, "touches");
+    for (int i = 0; i < n; i++) {
+        cJSON* t = cJSON_CreateObject();
+        cJSON_AddNumberToObject(t, "ms", kept[i].ms);
+        cJSON_AddNumberToObject(t, "x", kept[i].x0);
+        cJSON_AddNumberToObject(t, "y", kept[i].y0);
+        cJSON_AddNumberToObject(t, "x1", kept[i].x1);
+        cJSON_AddNumberToObject(t, "y1", kept[i].y1);
+        cJSON_AddStringToObject(t, "gesture", kept[i].gesture);
+        cJSON_AddItemToArray(touches, t);
+    }
+    return send_json(req, root);
+}
+
+// Call under LvglLockGuard: the servo bus belongs to the update task.
+void add_servo(cJSON* root, const char* name, motion::Servo& servo)
+{
+    cJSON* s = cJSON_AddObjectToObject(root, name);
+    motion::ServoFeedback_t f;
+    const bool ok = servo.readFeedback(f);
+    cJSON_AddBoolToObject(s, "ok", ok);
+    const auto limit = servo.getAngleLimit();
+    cJSON_AddNumberToObject(s, "angle", servo.getCurrentAngle() / 10.0);
+    cJSON_AddNumberToObject(s, "angleMin", limit.x / 10.0);
+    cJSON_AddNumberToObject(s, "angleMax", limit.y / 10.0);
+    cJSON_AddBoolToObject(s, "autoRelease", servo.getAutoTorqueReleaseEnabled());
+    if (!ok) {
+        return;
+    }
+    cJSON_AddNumberToObject(s, "raw", f.rawPos);
+    cJSON_AddNumberToObject(s, "zero", f.zeroPos);
+    cJSON_AddNumberToObject(s, "rawMin", f.rawMin);
+    cJSON_AddNumberToObject(s, "rawMax", f.rawMax);
+    cJSON_AddNumberToObject(s, "servoMin", f.servoMin);
+    cJSON_AddNumberToObject(s, "servoMax", f.servoMax);
+    // where the raw position says it is, not held to the limits: what a hand-turned head reads
+    cJSON_AddNumberToObject(s, "rawAngle", (f.rawPos - f.zeroPos) * 5.0 / 16.0);
+    cJSON_AddNumberToObject(s, "speed", f.speed);
+    cJSON_AddNumberToObject(s, "load", f.load);
+    cJSON_AddNumberToObject(s, "current", f.current);
+    cJSON_AddNumberToObject(s, "voltage", f.voltage / 10.0);
+    cJSON_AddNumberToObject(s, "temperature", f.temperature);
+    cJSON_AddBoolToObject(s, "moving", f.moving);
+    cJSON_AddBoolToObject(s, "torque", f.torque);
+}
+
+esp_err_t send_servo(httpd_req_t* req)
+{
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "uptimeMs", static_cast<double>(esp_timer_get_time() / 1000));
+    {
+        LvglLockGuard lock;
+        auto& motion = GetStackChan().motion();
+        cJSON_AddBoolToObject(root, "locked", motion.isModifyLocked());
+        add_servo(root, "yaw", motion.yawServo());
+        add_servo(root, "pitch", motion.pitchServo());
+    }
+    return send_json(req, root);
+}
+
+esp_err_t handle_servo(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    return send_servo(req);
+}
+
+esp_err_t handle_servo_set(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body = read_body(req);
+    if (body == nullptr) {
+        return send_error(req, "400 Bad Request", "expected any of \"lock\", \"hold\", \"torque\" as true or false");
+    }
+    const cJSON* lock_it = cJSON_GetObjectItem(body, "lock");
+    const cJSON* hold    = cJSON_GetObjectItem(body, "hold");
+    const cJSON* torque  = cJSON_GetObjectItem(body, "torque");
+    const cJSON* which   = cJSON_GetObjectItem(body, "servo");
+    const cJSON* zero    = cJSON_GetObjectItem(body, "zero");
+    if (cJSON_IsString(zero)) {
+        const bool yaw     = cJSON_IsString(which) && std::strcmp(which->valuestring, "yaw") == 0;
+        const bool pitch   = cJSON_IsString(which) && std::strcmp(which->valuestring, "pitch") == 0;
+        const bool here    = std::strcmp(zero->valuestring, "here") == 0;
+        const bool initial = std::strcmp(zero->valuestring, "default") == 0;
+        if (!(yaw || pitch) || !(here || initial)) {
+            cJSON_Delete(body);
+            return send_error(req, "400 Bad Request", "expected {\"servo\":\"yaw\"|\"pitch\",\"zero\":\"here\"|\"default\"}");
+        }
+        LvglLockGuard lock;
+        auto& motion = GetStackChan().motion();
+        auto& servo  = yaw ? motion.yawServo() : motion.pitchServo();
+        if (here) {
+            servo.setCurrentAngleAsZero();
+        } else {
+            servo.resetZeroCalibration();
+        }
+        mclog::tagInfo(_tag, "servo bench: {} zero set to {}", yaw ? "yaw" : "pitch", here ? "where it is" : "the default");
+    }
+    {
+        LvglLockGuard lock;
+        auto& motion = GetStackChan().motion();
+        if (cJSON_IsBool(lock_it)) {
+            motion.setModifyLock(cJSON_IsTrue(lock_it));
+        }
+        if (cJSON_IsBool(hold)) {
+            motion.setAutoTorqueReleaseEnabled(!cJSON_IsTrue(hold));
+        }
+        if (cJSON_IsBool(torque)) {
+            motion.setTorqueEnabled(cJSON_IsTrue(torque));
+        }
+    }
+    mclog::tagInfo(_tag, "servo bench: lock={} hold={} torque={}", cJSON_IsBool(lock_it) ? cJSON_IsTrue(lock_it) : -1,
+                   cJSON_IsBool(hold) ? cJSON_IsTrue(hold) : -1, cJSON_IsBool(torque) ? cJSON_IsTrue(torque) : -1);
+    cJSON_Delete(body);
+    return send_servo(req);
 }
 
 struct PhotoJob_t {
@@ -1184,7 +1456,7 @@ void start_httpd()
     config.ctrl_port        = CONFIG_STACKCHAN_CONTROL_PORT + 1;
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 24;  // 21 routes; past the cap a route silently fails to register
+    config.max_uri_handlers = 30;  // 26 routes; past the cap a route silently fails to register
 #ifdef CONFIG_STACKCHAN_CAMERA
     config.stack_size = 8192;  // the JPEG encoder runs on this task
 #else
@@ -1249,6 +1521,11 @@ void start_httpd()
         {"/api/settings", HTTP_POST, handle_settings, nullptr},
         {"/api/config", HTTP_POST, handle_config, nullptr},
         {"/api/sound", HTTP_POST, handle_sound, nullptr},
+        {"/api/touch-probe", HTTP_GET, handle_touch_probe, nullptr},
+        {"/api/touch-probe", HTTP_POST, handle_touch_tune, nullptr},
+        {"/api/servo", HTTP_GET, handle_servo, nullptr},
+        {"/api/servo", HTTP_POST, handle_servo_set, nullptr},
+        {"/api/screen-touch", HTTP_GET, handle_screen_touch, nullptr},
     };
     for (const auto& route : routes) {
         httpd_register_uri_handler(_server, &route);

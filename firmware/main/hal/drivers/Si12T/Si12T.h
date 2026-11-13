@@ -2,6 +2,7 @@
 #define __SI12T_H__
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -166,6 +167,18 @@ esp_err_t si12t_read_touch_result(si12t_handle_t handle, uint8_t *touch_result);
 void si12t_parse_touch_result(uint8_t touch_result);
 
 void si12t_parse_touch_result_to(uint8_t touch_result, uint8_t *parsed_result);
+
+/**
+ * @brief All three output registers: 12 channels, 2 bits each, channel 1 in the low bits of the first.
+ *        si12t_read_touch_result reads only the first, and the head uses 3 of its 4 channels.
+ */
+esp_err_t si12t_read_outputs(si12t_handle_t handle, uint8_t outputs[3]);
+
+/**
+ * @brief Read `count` registers starting at `first`, one at a time. For the bench: what the chip
+ *        was actually left holding (sensitivity, control, channel hold), not what we meant to write.
+ */
+esp_err_t si12t_read_registers(si12t_handle_t handle, uint8_t first, uint8_t *values, size_t count);
 
 #ifdef __cplusplus
 }

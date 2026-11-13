@@ -5,6 +5,7 @@
  */
 #pragma once
 #include "../modifiable.h"
+#include "../avatar/skins/custom/custom.h"
 #include <hal/hal.h>
 #include <cstdint>
 
@@ -42,7 +43,8 @@ public:
 
         // 如果处于晃动反应状态
         if (_is_reacting) {
-            if (now >= _next_toggle_tick) {
+            // a face showing its own dizzy pose moves its own mouth
+            if (!_posed && now >= _next_toggle_tick) {
                 _next_toggle_tick = now + 600;
 
                 _toggle_phase      = !_toggle_phase;
@@ -68,8 +70,40 @@ public:
     }
 
 private:
+    /**
+     * A sprite face that draws a dizzy pose shows that, whole: its eyes, its decorators, its roll and
+     * its lights. Which pose is the face's to say (face.yaml, head: shake: {pose: ...}); with nothing
+     * said it's "dizzy". Until 12 Nov 2026 a shake hid the eyes and drew only the dizzy decorator, so
+     * a face's dizzy eyes were never seen. A face with no such pose gets what it always got.
+     */
+    bool show_dizzy_pose(Modifiable& stackchan)
+    {
+        auto* custom = dynamic_cast<avatar::CustomAvatar*>(&stackchan.avatar());
+        if (custom == nullptr) {
+            return false;
+        }
+        std::string pose = "dizzy";
+        const auto said  = custom->headTouches().find("shake");
+        if (said != custom->headTouches().end()) {
+            pose = said->second.pose;
+        }
+        if (!custom->hasPose(pose)) {
+            return false;
+        }
+        // a little longer than the reaction, so the pose is still up when the head is let move again
+        custom->react(pose, _reaction_duration_ms + 200);
+        return true;
+    }
+
     void handle_shake_start(Modifiable& stackchan, uint32_t now)
     {
+        if (_is_reacting && _posed) {
+            show_dizzy_pose(stackchan);  // still being shaken: the pose stays up that much longer
+        }
+        if (!_is_reacting && show_dizzy_pose(stackchan)) {
+            _is_reacting = true;
+            _posed       = true;
+        }
         if (!_is_reacting) {
             // 首次触发时，记录状态以便恢复
             _is_reacting = true;
@@ -111,17 +145,20 @@ private:
             return;
         }
 
-        auto& avatar = stackchan.avatar();
-        avatar.setModifyLock(false);
-        avatar.leftEye().setVisible(true);
-        avatar.rightEye().setVisible(true);
-        avatar.mouth().setWeight(0);
-        avatar.mouth().setRotation(0);
+        if (!_posed) {
+            auto& avatar = stackchan.avatar();
+            avatar.setModifyLock(false);
+            avatar.leftEye().setVisible(true);
+            avatar.rightEye().setVisible(true);
+            avatar.mouth().setWeight(0);
+            avatar.mouth().setRotation(0);
 
-        stackchan.avatar().removeDecorator(_dizzy_decorator_id);
-        stackchan.avatar().removeDecorator(_shy_decorator_id);
-        _dizzy_decorator_id = -1;
-        _shy_decorator_id   = -1;
+            stackchan.avatar().removeDecorator(_dizzy_decorator_id);
+            stackchan.avatar().removeDecorator(_shy_decorator_id);
+            _dizzy_decorator_id = -1;
+            _shy_decorator_id   = -1;
+        }
+        _posed = false;
 
         auto& motion = stackchan.motion();
         motion.setModifyLock(false);
@@ -135,6 +172,7 @@ private:
 
     // 状态控制
     bool _is_reacting          = false;
+    bool _posed                = false;  // this shake is showing the face's own dizzy pose
     bool _toggle_phase         = false;
     uint32_t _restore_at       = 0;
     uint32_t _next_toggle_tick = 0;

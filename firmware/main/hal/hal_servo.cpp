@@ -123,6 +123,27 @@ public:
         return torque_enable > 0;
     }
 
+    bool readFeedback(ServoFeedback_t& out) override
+    {
+        if (_scs_bus.FeedBack(_config.id) < 0) {
+            return false;
+        }
+        out.rawPos      = _scs_bus.ReadPos(-1);
+        out.speed       = _scs_bus.ReadSpeed(-1);
+        out.load        = _scs_bus.ReadLoad(-1);
+        out.voltage     = _scs_bus.ReadVoltage(-1);
+        out.temperature = _scs_bus.ReadTemper(-1);
+        out.current     = _scs_bus.ReadCurrent(-1);
+        out.moving      = _scs_bus.ReadMove(-1) != 0;
+        out.torque      = getTorqueEnabled();
+        out.zeroPos     = _zero_pos;
+        out.rawMin      = _runtime_raw_pos_limit.x;
+        out.rawMax      = _runtime_raw_pos_limit.y;
+        out.servoMin    = _scs_bus.readWord(_config.id, SCSCL_MIN_ANGLE_LIMIT_L);
+        out.servoMax    = _scs_bus.readWord(_config.id, SCSCL_MAX_ANGLE_LIMIT_L);
+        return true;
+    }
+
     void setCurrentAngleAsZero() override
     {
         int current_pos = _scs_bus.ReadPos(_config.id);

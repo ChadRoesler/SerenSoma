@@ -291,6 +291,24 @@ esp_err_t si12t_read_touch_result(si12t_handle_t handle, uint8_t *touch_result)
     return si12t_i2c_read_reg(handle, SI12T_OUTPUT1_ADDR, touch_result);
 }
 
+esp_err_t si12t_read_registers(si12t_handle_t handle, uint8_t first, uint8_t *values, size_t count)
+{
+    if (handle == NULL || values == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t ret = ESP_OK;
+    for (size_t i = 0; i < count; i++) {
+        ret |= si12t_i2c_read_reg(handle, (uint8_t)(first + i), &values[i]);
+    }
+    return ret;
+}
+
+esp_err_t si12t_read_outputs(si12t_handle_t handle, uint8_t outputs[3])
+{
+    return si12t_read_registers(handle, SI12T_OUTPUT1_ADDR, outputs, 3);
+}
+
 void si12t_parse_touch_result(uint8_t touch_result)
 {
     int index = 0;

@@ -11,12 +11,48 @@
 namespace stackchan::motion {
 
 /**
+ * @brief What a servo says about itself right now, for the bench (GET /api/servo). Raw units are the
+ *        servo's own: position in steps (0.3125 degrees each), load as tenths of a percent of the
+ *        drive it's putting out, voltage in tenths of a volt, temperature in degrees C.
+ */
+struct ServoFeedback_t {
+    int rawPos      = 0;
+    int zeroPos     = 0;  // the raw position that is angle 0, calibrated or the default
+    int rawMin      = 0;  // the raw limits in force now: stall protection can pull them in
+    int rawMax      = 0;
+    int servoMin    = -1;  // the limits the servo itself holds, in its own memory; -1 if it didn't say
+    int servoMax    = -1;
+    int speed       = 0;
+    int load        = 0;
+    int voltage     = 0;
+    int temperature = 0;
+    int current     = 0;
+    bool moving     = false;
+    bool torque     = false;
+};
+
+/**
  * @brief
  *
  */
 class Servo {
 public:
     virtual ~Servo() = default;
+
+    /**
+     * @brief Ask the servo itself where it is and how hard it's working.
+     *
+     * @return false if this servo can't say, or didn't answer
+     */
+    virtual bool readFeedback(ServoFeedback_t& out)
+    {
+        return false;
+    }
+
+    bool getAutoTorqueReleaseEnabled() const
+    {
+        return _auto_torque_release_enabled;
+    }
 
     /**
      * @brief

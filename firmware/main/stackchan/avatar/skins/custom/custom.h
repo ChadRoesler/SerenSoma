@@ -482,6 +482,11 @@ public:
 
     /** @brief Show a pose for a moment, then go back to what was showing. Unknown names do nothing. */
     void react(const std::string& emotion, uint32_t ms);
+    /** @brief Whether this face draws a pose by that name. */
+    bool hasPose(const std::string& emotion) const
+    {
+        return _valid && _manifest.pose(emotion) != nullptr;
+    }
 
     /** @brief Replace the current pose's twitch, until the next emotion. For trying one out. */
     void setTwitch(const PoseTwitch_t& twitch);
@@ -499,6 +504,25 @@ public:
     const std::string& resting() const
     {
         return _resting;
+    }
+    /**
+     * @brief Hold the pose that's showing: until it's let go, nothing else changes it. Not a touch
+     *        spot, not /api/react, not a stroke's happy face, not the voice code's neutral, not an
+     *        emotion from a reply. For trying a pose from the studio, where the look, brows, lights
+     *        and twitch being tried exist only on the pose as it stands and the next pose would lose
+     *        them. Whoever holds it sets the pose first and holds second; the tries (setTwitch,
+     *        showLights, tryRig) still work on a held pose. Never saved: a reboot lets go.
+     */
+    void setHeld(bool held);
+    bool held() const
+    {
+        return _held;
+    }
+    /** @brief The pose being held, or empty when nothing is. */
+    const std::string& heldPose() const
+    {
+        static const std::string none;
+        return _held ? _current_emotion : none;
     }
     /** @brief While talking the speech moves the mouth, and a pose's own mouth motion waits. */
     void setTalking(bool talking)
@@ -554,6 +578,8 @@ private:
     void tickLights(uint32_t nowMs);
 
     std::string _resting;
+    bool _held                  = false;
+    bool applyPose(const std::string& emotion);
     bool _talking               = false;
     uitk::Vector2i _base_look_left{0, 0};   // the pose's (or a try's) look, which a roll adds to
     uitk::Vector2i _base_look_right{0, 0};

@@ -168,6 +168,71 @@ size_t touch_log::read(uint32_t since_ms, char* out, size_t capacity)
     return used;
 }
 
+// ---------------------------------------------------------------- the screen's touches
+namespace {
+screen_touch::Touch_t _screen_touches[screen_touch::kKept];
+std::atomic<uint32_t> _screen_count{0};
+}  // namespace
+
+void screen_touch::add(uint32_t ms, int x0, int y0, int x1, int y1, const char* gesture)
+{
+    Touch_t& t = _screen_touches[_screen_count.load() % kKept];
+    t          = {ms, static_cast<int16_t>(x0), static_cast<int16_t>(y0), static_cast<int16_t>(x1), static_cast<int16_t>(y1),
+                  gesture};
+    _screen_count.fetch_add(1);  // after it's whole, so a reader never sees half of one
+}
+
+int screen_touch::recent(Touch_t* out)
+{
+    const uint32_t count = _screen_count.load();
+    int n                = 0;
+    for (uint32_t i = count > kKept ? count - kKept : 0; i < count; i++) {
+        out[n++] = _screen_touches[i % kKept];
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- the bench
+namespace {
+si12t_handle_t _si12t = nullptr;  // set once in head_touch_init; the driver's calls take the bus lock
+bool _sens_high       = false;
+int _sens_level       = 3;
+}  // namespace
+
+bool touch_bench::probe(Probe_t& out)
+{
+    if (_si12t == nullptr) {
+        return false;
+    }
+    uint8_t outputs[3] = {0};
+    esp_err_t ret      = si12t_read_outputs(_si12t, outputs);
+    ret |= si12t_read_registers(_si12t, SI12T_SENSITIVITY1_ADDR, out.sensitivity, 6);
+    ret |= si12t_read_registers(_si12t, SI12T_CTRL1_ADDR, &out.ctrl1, 1);
+    ret |= si12t_read_registers(_si12t, SI12T_CTRL2_ADDR, &out.ctrl2, 1);
+    ret |= si12t_read_registers(_si12t, SI12T_CH_HOLD1_ADDR, out.hold, 2);
+    for (int i = 0; i < 12; i++) {
+        out.channels[i] = (outputs[i / 4] >> ((i % 4) * 2)) & 0x03;
+    }
+    out.high  = _sens_high;
+    out.level = _sens_level;
+    return ret == ESP_OK;
+}
+
+bool touch_bench::set_sensitivity(bool high, int level)
+{
+    if (_si12t == nullptr || level < 0 || level > 7) {
+        return false;
+    }
+    if (si12t_set_sensitivity(_si12t, high ? SI12T_TYPE_HIGH : SI12T_TYPE_LOW,
+                              static_cast<si12t_sensitivity_level_t>(level)) != ESP_OK) {
+        return false;
+    }
+    _sens_high  = high;
+    _sens_level = level;
+    mclog::tagInfo(_tag, "bench: sensitivity {} level {}", high ? "high" : "low", level);
+    return true;
+}
+
 static void _head_touch_update_task(void* param)
 {
     mclog::tagInfo(_tag, "start update task");
@@ -216,6 +281,7 @@ void Hal::head_touch_init()
     static si12t_handle_t si12t;
     si12t_init(&si12t_cfg, &si12t);
     si12t_setup(si12t, SI12T_TYPE_LOW, SI12T_SENSITIVITY_LEVEL_3);
+    _si12t = si12t;
 
     // xTaskCreateWithCaps(_head_touch_update_task, "headtouch", 1024 * 6, si12t, 2, NULL, MALLOC_CAP_SPIRAM);
     xTaskCreatePinnedToCoreWithCaps(_head_touch_update_task, "headtouch", 1024 * 6, si12t, 2, NULL, 1,

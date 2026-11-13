@@ -286,6 +286,7 @@ void StackChanAvatarDisplay::SetupUI()
             }
             const bool tap = std::strcmp(gesture, "tap") == 0;
             ESP_LOGI(TAG, "%s at %d,%d", gesture, (int)at.x, (int)at.y);
+            screen_touch::add(GetHAL().millis(), at.x, at.y, lifted.x, lifted.y, gesture);
             if (auto* custom = dynamic_cast<CustomAvatar*>(&GetStackChan().avatar())) {
                 const uint8_t none[3] = {0, 0, 0};
                 const int spot        = custom->spotAt(at.x, at.y, gesture);
@@ -463,6 +464,11 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
     DisplayLockGuard lock(this);
 
     auto& avatar = stackchan.avatar();
+
+    // A held pose stays: none of what follows happens, the sleep side effects included.
+    if (auto* custom = dynamic_cast<CustomAvatar*>(&avatar); custom && custom->held()) {
+        return;
+    }
 
     if (strcmp(emotion, "neutral") == 0) {
         if (auto* custom = dynamic_cast<CustomAvatar*>(&avatar); custom && !custom->resting().empty()) {

@@ -9,7 +9,8 @@
       silence; nothing restarts.</p>
     <div class="msg tiny" id="deadAirMsg"></div>
     <p class="muted tiny">This page builds the body: setting the robot up, its firmware, and its log for whoever's
-      helping. Its faces, and watching and feeling how it's touched, are SerenPsycheion's.</p>
+      helping. Touch and Servos are the hardware as it is: which pad answers where, and how the neck is
+      running. Its faces, and what a touch means to it, are SerenPsycheion's.</p>
   </div>
 </section>
 
@@ -75,5 +76,206 @@
     <table class="staged"><thead><tr><th>Staged</th><th>From</th><th>Size</th><th></th></tr></thead>
       <tbody id="fwRows"></tbody></table>
     <div class="msg tiny" id="fwMsg"></div>
+  </div>
+</section>
+
+<section class="view" id="touch">
+  <div class="card">
+    <h3>The touch chip, live</h3>
+    <div class="row">
+      <button class="btn primary" id="tbWatch">Start watching</button>
+      <span class="muted tiny" id="tbRate"></span>
+    </div>
+    <div class="cells" id="tbCells"></div>
+    <canvas class="strip" id="tbStrip" width="900" height="150"></canvas>
+    <p class="muted tiny">The head has three pads in a line, back to front, on the chip's channels 1 to 3; the board's
+      drawing shows nothing on the other nine. Each pad reads 0 to 3. The cells are the chip asked right now; the
+      strip is the robot's own record of the last 20 seconds, a reading every 50 ms while something touches, so a
+      tap too quick for the cells still shows there and lights its cell for a moment. An arrow on the strip is where
+      the robot read a swipe. A touch shorter than the robot's own 50 ms between readings can be missed by the
+      robot too, and then it is nowhere.</p>
+    <div class="facts" id="tbFacts"></div>
+    <h4>Sensitivity</h4>
+    <div class="row">
+      <select id="tbType"><option value="low">low</option><option value="high">high</option></select>
+      <select id="tbLevel"></select>
+      <button class="btn" id="tbTune">Try it</button>
+      <span class="muted tiny">Until the robot's next boot; it starts at low, level 3. Chart the same spots at two
+        settings to see what a setting changes.</span>
+    </div>
+    <div class="msg tiny" id="tbMsg"></div>
+  </div>
+
+  <div class="card">
+    <h3>The screen, live</h3>
+    <div class="screen">
+      <svg id="scMap" viewBox="0 0 320 240"></svg>
+      <div class="side">
+        <div class="facts" id="scFacts"></div>
+        <table class="staged"><thead><tr><th>Read as</th><th class="num">Down at</th><th class="num">Lifted at</th><th class="num">Ago</th></tr></thead>
+          <tbody id="scRows"></tbody></table>
+      </div>
+    </div>
+    <p class="muted tiny">Runs with the watching above. The ring is where the screen's touch driver says a finger is
+      right now, on the screen's own pixels (0,0 is the top left as you face it), with a trail behind it; the dots
+      are the last touches the face saw, a line from where each came down to where it lifted. Put a fingertip on
+      something you can see on the face and check the ring lands on it. Only touches on the face are kept in the
+      list; the ring follows a finger anywhere.</p>
+  </div>
+
+  <div class="card">
+    <h3>Chart the pads</h3>
+    <p class="muted tiny">Click the drawing where your finger is going to be, put your finger there on the robot, and
+      record. The point keeps what each pad did while you held it. The drawing is the head from above with the
+      face toward you; it is only a place to put points, so use the edges for the sides of the head if you want
+      them. Points are kept on this box (<code>touch_map.json</code> in the state folder).</p>
+    <div class="chart">
+      <svg id="tbMap" viewBox="0 0 300 300"></svg>
+      <div class="side">
+        <div class="row">
+          <input id="tbLabel" maxlength="60" placeholder="what this spot is (optional)">
+          <select id="tbSecs"><option value="1500">1.5 s</option><option value="3000" selected>3 s</option><option value="6000">6 s</option></select>
+          <button class="btn primary" id="tbRecord">Record this spot</button>
+        </div>
+        <div class="msg tiny" id="tbMapMsg"></div>
+        <h4>What each pad answers to</h4>
+        <div class="facts" id="tbChannels"></div>
+        <table class="staged"><thead><tr><th>Spot</th><th>Pads</th><th>Sensitivity</th><th></th></tr></thead>
+          <tbody id="tbPoints"></tbody></table>
+        <div class="row">
+          <button class="btn" id="tbExport">Download the chart</button>
+          <button class="btn" id="tbClear">Clear it</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>How a touch gets from the pad to the face</h3>
+    <ol class="how muted tiny">
+      <li>The chip (an Si12T, on the I2C bus at 0x68) reports each channel as 0 to 3. That number is how sure it is
+        something is there, not how hard it's pressed: a light brush reads 3.</li>
+      <li>The firmware reads channels 1 to 3 every 50 ms, as back, middle and front, and works out one position from
+        them, -100 at the back to +100 at the front.</li>
+      <li>On the robot, a touch starting is a press, lifting is a release, and the position moving 40 or more from
+        where it started is a swipe forward or backward. Those drive the robot's own reactions.</li>
+      <li>Readings taken while something is touching are kept for about a minute (<code>/api/touch-raw</code>).
+        Taps on the screen join the same feed.</li>
+      <li>This server reads that feed once a second and names each touch: stroke, poke (back, middle or front),
+        scritch, a resting finger or a whole hand, then asks the robot for the face that goes with it.</li>
+    </ol>
+  </div>
+</section>
+
+<section class="view" id="servos">
+  <div class="card">
+    <h3>The neck, live</h3>
+    <div class="row">
+      <button class="btn primary" id="svWatch">Start watching</button>
+      <label class="row"><input type="checkbox" id="svLock"> <span class="tiny">Bench mode: nothing else moves the head</span></label>
+      <label class="row"><input type="checkbox" id="svHold"> <span class="tiny">Hold position at rest</span></label>
+      <button class="btn" id="svRelease">Let go</button>
+    </div>
+    <table class="staged"><thead><tr><th></th><th class="num">Angle</th><th class="num">By raw</th><th class="num">Raw</th>
+      <th class="num">Zero</th><th class="num">Limits</th><th class="num">Reach</th><th class="num">Load</th><th class="num">Current</th>
+      <th class="num">Volts</th><th class="num">°C</th><th>Torque</th><th>Moving</th></tr></thead>
+      <tbody id="svRows"></tbody></table>
+    <p class="muted tiny">What each servo says about itself. <b>Angle</b> is where the firmware takes it to be, held to
+      its limits; <b>By raw</b> is the servo's own position turned into degrees, so with the head let go you can turn
+      it by hand and read where it really is. Raw is the servo's steps (0.3125° each), Zero the step that counts as
+      0°. Load is how much of its drive it's using, in tenths of a percent. Bench mode stops the idle looking-around
+      and the nod when petted; picking the robot up turns it off again. <b>Reach</b> is how far the servo can
+      actually be sent each way from its zero, in degrees, once the firmware's limits, the 0 to 1000 step range and
+      the servo's own limits have each had their say. Nothing above is saved on the robot.</p>
+    <div class="msg tiny" id="svMsg"></div>
+  </div>
+
+  <div class="card">
+    <h3>Recentre</h3>
+    <p class="muted tiny">Where a servo is right now becomes its 0°. Let go, put the head where 0° should be by hand
+      (yaw: facing straight ahead; pitch: level, looking forward), then set it. This is the one thing on this page the
+      robot keeps: it is the same home position the robot's own setup menu sets, one servo at a time.</p>
+    <div class="row">
+      <button class="btn" id="svZeroYaw">Yaw: this is 0°</button>
+      <button class="btn" id="svZeroPitch">Pitch: this is 0°</button>
+      <span class="muted tiny">or back to the build's default:</span>
+      <button class="btn" id="svZeroYawDef">yaw</button>
+      <button class="btn" id="svZeroPitchDef">pitch</button>
+    </div>
+    <div class="msg tiny" id="svZeroMsg"></div>
+  </div>
+
+  <div class="card">
+    <h3>Move it</h3>
+    <label class="field"><span>Yaw</span><input type="range" id="svYaw" min="-128" max="128" value="0"><output id="svYawOut" class="tiny"></output></label>
+    <label class="field"><span>Pitch</span><input type="range" id="svPitch" min="0" max="90" value="20"><output id="svPitchOut" class="tiny"></output></label>
+    <label class="field"><span>Speed</span><input type="range" id="svSpeed" min="100" max="1000" step="50" value="300"><output id="svSpeedOut" class="tiny"></output></label>
+    <div class="row">
+      <button class="btn primary" id="svGo">Go</button>
+      <button class="btn" id="svCentre">Centre</button>
+      <label class="row"><input type="checkbox" id="svFollow"> <span class="tiny">Follow the sliders</span></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Sweep</h3>
+    <div class="row">
+      <select id="swAxis"><option value="yaw">yaw</option><option value="pitch">pitch</option></select>
+      <label class="tiny">from <input type="number" id="swFrom" value="-90"></label>
+      <label class="tiny">to <input type="number" id="swTo" value="90"></label>
+      <label class="tiny">step <input type="number" id="swStep" value="15" min="1"></label>
+      <label class="tiny">speed <input type="number" id="swSpeed" value="300" min="100" max="1000" step="50"></label>
+      <button class="btn primary" id="swRun">Run</button>
+      <button class="btn" id="swCsv">Download</button>
+    </div>
+    <canvas class="strip" id="swChart" width="900" height="220"></canvas>
+    <p class="muted tiny">Steps one axis out and back, waits for it to stop at each step, and keeps where it was asked
+      to go, where the servo says it got to, and the load there. Bars are how far off it landed (out one way, back
+      the other); the line is the load. A step that lands short with the load up is the neck meeting something.</p>
+    <div class="facts" id="swFacts"></div>
+    <div class="msg tiny" id="swMsg"></div>
+  </div>
+</section>
+
+<section class="view" id="lights">
+  <div class="card">
+    <h3>The lights, one at a time</h3>
+    <div class="row">
+      <input type="color" id="ldColor" value="#3c3c3c">
+      <button class="btn primary" id="ldWalk">Walk them</button>
+      <button class="btn" id="ldAll">All on</button>
+      <button class="btn" id="ldOff">All off</button>
+      <button class="btn" id="ldRead">Read them back</button>
+    </div>
+    <div class="rails" id="ldCells"></div>
+    <p class="muted tiny">The firmware counts 12 LEDs, 0 to 5 on one rail and 6 to 11 on the other. Click one to light
+      only that one; Walk lights each in turn for a second. Write under each where it really sits on the robot, and it
+      is kept with the touch chart. The dashed ones (0, 1, 6 and 7) are the ones the robot keeps for the microphone,
+      reply and camera lights; a face's own colours use the rest. The swatch is what the LED was last told to show,
+      not what night mode lets through, and a colour stops at 168 of 255. The next pose with colours of its own takes
+      the rails back.</p>
+    <div class="msg tiny" id="ldMsg"></div>
+  </div>
+</section>
+
+<section class="view" id="voice">
+  <div class="card">
+    <h3>Back and forth, timed</h3>
+    <div class="facts" id="vcFacts"></div>
+    <div class="key" id="vcKey"></div>
+    <table class="staged"><thead><tr><th>When</th><th>Turn</th><th>Where the time went</th><th class="num">Last word to first sound</th></tr></thead>
+      <tbody id="vcRows"></tbody></table>
+    <p class="muted tiny">Each thing heard and each thing said, newest first, with how long every leg took. No words are
+      kept here, only how many. A reply's bar starts when you stopped talking and ends at the robot's first sound:
+      waiting for enough quiet to be sure you'd finished, transcribing, whoever answers thinking, rendering the first
+      sentence into a voice, and opening the channel. A line is rendered a sentence at a time, so the wait is for
+      the first sentence, not the whole line.</p>
+    <h4>Quiet that ends a turn</h4>
+    <label class="field"><span>Quiet</span><input type="range" id="vcQuiet" min="300" max="2500" step="50">
+      <output id="vcQuietOut" class="tiny"></output></label>
+    <p class="muted tiny">How long the room has to be quiet before what you said counts as finished. Every turn waits
+      this long before anything else starts, so shorter is snappier and cuts you off more when you pause to think.
+      Takes effect on the next thing you say.</p>
+    <div class="msg tiny" id="vcMsg"></div>
   </div>
 </section>

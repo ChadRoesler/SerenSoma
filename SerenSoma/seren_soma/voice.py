@@ -7,8 +7,8 @@ sensor into touches and faces, and it owns night mode and work hours.
 
 There is no mind in here: whoever answers reads heard.jsonl and POSTs /say.
 
-TWO TOKENS. The API token (<state>/token, or server.bearer_token_*) guards /say, /settings, /touch,
-/clip, /status and /api/logs, and never leaves this box. The device token (<state>/device_token) is
+TWO TOKENS. The API token (<state>/token, or server.bearer_token_*) guards /say, /heard, /settings,
+/touch, /clip, /status and /api/logs, and never leaves this box. The device token (<state>/device_token) is
 what /ota/ hands the robot for its websocket, and /ota/ answers only the robot's own address. Until
 7 Nov 2026 they were one token, and /ota/ gave it to anything on the LAN that asked.
 """
@@ -26,6 +26,8 @@ import av
 import numpy as np
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, WSMsgType, web
 
+from .bench import Bench
+from .timing import VoiceClock
 from .touch_read import HEAD_KINDS, TouchReader, in_window, label_scratching, reaction_for, scritching
 
 log = logging.getLogger("seren-soma")
@@ -53,11 +55,16 @@ DEFAULT_SETTINGS = {
     "work_hours": {"days": [0, 1, 2, 3, 4], "start": 8, "end": 17},
     # The dead-air timer: an open channel with no words this long hangs up. Live: the next silence
     # uses it. idle_close_seconds in seren-soma.yaml is only where it starts on a fresh install.
-    "channel": {"dead_air_seconds": 60},
+    # end_silence_ms: how much quiet after talking counts as "finished". Every turn waits this long
+    # before anything else can start, so it is the first thing to shorten for quick back and forth,
+    # and the first thing to lengthen if it cuts people off mid-thought.
+    "channel": {"dead_air_seconds": 60, "end_silence_ms": 900},
 }
 
 
 DEAD_AIR_RANGE = (10, 600)
+END_SILENCE_RANGE = (300, 2500)
+CHANNEL_RANGES = {"dead_air_seconds": ("seconds", DEAD_AIR_RANGE), "end_silence_ms": ("milliseconds", END_SILENCE_RANGE)}
 
 
 def load_settings(dead_air_default=None):
@@ -97,8 +104,10 @@ def merge_settings(current, change):
                     raise ValueError(f"{section}.{k} is 0 to 100")
                 if section == "work_hours" and v > 24:
                     raise ValueError(f"{section}.{k} is an hour, 0 to 24")
-                if section == "channel" and not DEAD_AIR_RANGE[0] <= v <= DEAD_AIR_RANGE[1]:
-                    raise ValueError(f"{section}.{k} is seconds, {DEAD_AIR_RANGE[0]} to {DEAD_AIR_RANGE[1]}")
+                if section == "channel":
+                    unit, (lo, hi) = CHANNEL_RANGES[k]
+                    if not lo <= v <= hi:
+                        raise ValueError(f"{section}.{k} is {unit}, {lo} to {hi}")
             elif isinstance(want, str):
                 if not isinstance(v, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
                     raise ValueError(f"{section}.{k} is a time like 22:30")
@@ -115,9 +124,15 @@ FRAME_MS = 60
 LIVE_S = 180          # words this recent mean a call back is a reply, not me barging in
 REPLY_WINDOW_S = 10   # how long a call back stays open for an answer
 SPEECH_RMS = 500      # 16-bit RMS above this is speech; tune against a real room
-END_SILENCE_MS = 900  # this much quiet after speech ends an utterance
+END_SILENCE_MS = 900  # this much quiet after speech ends an utterance, until the live setting says otherwise
 MIN_SPEECH_MS = 300   # shorter than this was a noise
 MAX_UTTERANCE_S = 20
+# The speech service puts a model away when nobody has used it for a while, and the next line then
+# waits for it to load: 40 s for the voice on 12 Nov 2026, against about a second once it's loaded.
+# So when the robot opens its channel and the service has sat idle this long, a throwaway line is
+# rendered and a moment of quiet transcribed, and both are loaded by the time anyone speaks.
+WARM_AFTER_S = 90
+WARM_LINE = "Okay."
 
 # A clip whose transcript is nothing but sound tags, like "(keyboard clacking)" or "[music]".
 SOUND_TAGS = re.compile(r"^(?:\s|[.,!?…♪-]|\([^)]*\)|\[[^\]]*\]|\*[^*]*\*)*$")
@@ -161,6 +176,27 @@ def lodestar_from_symposium(path: Path) -> tuple[str, str]:
     if not url or not tok:
         raise SystemExit(f"lodestar block in {path} lacks url or bearer_token")
     return url.group(1), tok.group(1).strip("'\"")
+
+
+# A sentence: up to its closing punctuation (and any quote or bracket after it), when a space or
+# the end follows. "3.5" and "e.g" stay whole; "Mr. Smith" splits, and that's fine for speech.
+SENTENCE = re.compile(r'''.+?(?:[.!?…]+["')\]]*(?=\s|$)|$)''', re.S)
+SHORT_PIECE = 12
+
+
+def split_sentences(text: str) -> list[str]:
+    """The pieces a line is rendered and spoken in. The first piece is what the room waits for, so
+    it's kept as short as it comes, a lone "Ha!" included. After it, a piece too short to carry its
+    own tone joins the one before."""
+    parts = [m.group(0).strip() for m in SENTENCE.finditer(text.strip())]
+    parts = [x for x in parts if x]
+    out: list[str] = []
+    for part in parts:
+        if len(out) > 1 and len(part) < SHORT_PIECE:
+            out[-1] = f"{out[-1]} {part}"
+        else:
+            out.append(part)
+    return out or ([text.strip()] if text.strip() else [])
 
 
 def wav_bytes(pcm: np.ndarray, rate: int) -> bytes:
@@ -219,6 +255,7 @@ class Device:
         self.ready = False                  # its hello has been answered
         self.deaf = False                   # opened by me to say something: what the mic hears is dropped
         self.last_words = time.monotonic()  # the channel hangs up after too long without any
+        self.ended_quiet_ms = 0
         self.reset()
 
     def reset(self):
@@ -227,8 +264,9 @@ class Device:
         self.quiet_ms = 0
         self.in_speech = False
 
-    def feed(self, packet: bytes):
-        """Decode one frame. Returns a finished utterance's samples, or None."""
+    def feed(self, packet: bytes, end_silence_ms: int = END_SILENCE_MS):
+        """Decode one frame. Returns a finished utterance's samples, or None. ended_quiet_ms is then
+        how much quiet it waited through, so whoever times the turn knows when the talking stopped."""
         chunks = []
         for frame in self.decoder.decode(av.Packet(packet)):
             # the Opus decoder hands back 48 kHz whatever it was told; bring it to the rate we count in
@@ -250,9 +288,10 @@ class Device:
             self.quiet_ms += ms
 
         total_ms = sum(len(p) for p in self.pcm) * 1000 / IN_RATE
-        if self.in_speech and (self.quiet_ms >= END_SILENCE_MS or total_ms >= MAX_UTTERANCE_S * 1000):
+        if self.in_speech and (self.quiet_ms >= end_silence_ms or total_ms >= MAX_UTTERANCE_S * 1000):
             done = np.concatenate(self.pcm)
             enough = self.speech_ms >= MIN_SPEECH_MS
+            self.ended_quiet_ms = self.quiet_ms
             self.reset()
             return done if enough else None
         return None
@@ -290,6 +329,10 @@ class Link:
         self.hand = {"down": False}  # the head touch the hand hasn't lifted from yet, on the robot's clock
         self.night_now = None       # what was last sent: True, False, or None before the first look
         self.firmware_armed = None  # {"version", "file"}: offered on the next check-in, once
+        self.clock = VoiceClock()   # how long each leg of a turn took (timing.py); no words in it
+        self.heard_recent = []      # what was heard since this server started, for GET /heard
+        self.heard_event = asyncio.Event()  # set, and replaced, each time something is heard
+        self.speech_used = 0.0      # when the speech service last rendered or transcribed for us (monotonic)
         HEARD_DIR.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -297,10 +340,39 @@ class Link:
         """Seconds of no words before an open channel hangs up: the live setting, read every time."""
         return int(self.settings["channel"]["dead_air_seconds"])
 
+    @property
+    def end_silence_ms(self) -> int:
+        """How much quiet ends an utterance: the live setting, read on every frame."""
+        return int(self.settings["channel"]["end_silence_ms"])
+
     def lodestar_headers(self):
         return {"Authorization": f"Bearer {self.lodestar_token}"}
 
+    async def warm(self):
+        """Load the voice and the ears before they're needed (see WARM_AFTER_S). Never raises."""
+        if time.monotonic() - self.speech_used < WARM_AFTER_S:
+            return
+        self.speech_used = time.monotonic()    # now, so two openings in a row warm once
+        started = time.monotonic()
+        try:
+            form = FormData()
+            form.add_field("file", wav_bytes(np.zeros(IN_RATE // 2, dtype=np.int16), IN_RATE), filename="quiet.wav",
+                           content_type="audio/wav")
+            form.add_field("language", "en")
+            form.add_field("holder", "seren-voice")
+
+            async def ears():
+                async with self.http.post(f"{self.lodestar_url}/api/v1/hear", headers=self.lodestar_headers(), data=form,
+                                          timeout=ClientTimeout(total=120)) as r:
+                    await r.read()
+
+            await asyncio.gather(self.speak_wav(WARM_LINE, self.args.voice), ears())
+            log.info("warmed the voice and the ears in %.1fs", time.monotonic() - started)
+        except Exception as e:  # noqa: BLE001 - a warm-up that fails costs nothing but the wait it would have saved
+            log.info("warm-up didn't finish: %s", e)
+
     async def speak_wav(self, text: str, voice: str) -> bytes:
+        self.speech_used = time.monotonic()
         async with self.http.post(f"{self.lodestar_url}/api/v1/speak", headers=self.lodestar_headers(),
                                   json={"text": text, "holder": "seren-voice", **({"voice": voice} if voice else {})},
                                   timeout=ClientTimeout(total=240)) as r:
@@ -308,7 +380,10 @@ class Link:
                 raise web.HTTPBadGateway(text=f"speak: {r.status} {(await r.text())[:200]}")
             return await r.read()
 
-    async def hear(self, pcm: np.ndarray):
+    async def hear(self, pcm: np.ndarray, detected: float | None = None, quiet_ms: float = 0):
+        """detected: when the utterance was called finished (time.monotonic()). quiet_ms: how much quiet
+        that took, so the talking stopped at detected - quiet_ms."""
+        detected = time.monotonic() if detected is None else detected
         name = time.strftime("%Y%m%d-%H%M%S")
         data = wav_bytes(pcm, IN_RATE)
         path = HEARD_DIR / f"{name}.wav"
@@ -319,6 +394,7 @@ class Link:
         form.add_field("holder", "seren-voice")
         text = ""
         transcribed = False
+        self.speech_used = time.monotonic()
         try:
             async with self.http.post(f"{self.lodestar_url}/api/v1/hear", headers=self.lodestar_headers(), data=form,
                                       timeout=ClientTimeout(total=120)) as r:
@@ -330,7 +406,10 @@ class Link:
         except Exception as e:
             log.warning("hear failed: %s", e)
         # Only a clip that was really transcribed can be called noise: a failed hear may hold words.
-        if transcribed and not has_words(text):
+        wordless = transcribed and not has_words(text)
+        self.clock.heard(speech_end=detected - quiet_ms / 1000, detected=detected, done=time.monotonic(),
+                         audio_s=len(pcm) / IN_RATE, words=0 if wordless else len(text.split()), transcribed=transcribed)
+        if wordless:
             path.unlink(missing_ok=True)
             log.info("dropped a clip with no words (%.1fs)", len(pcm) / IN_RATE)
             return
@@ -339,6 +418,11 @@ class Link:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         log.info("heard (%ss): %s", entry["seconds"], text)
         self.last_heard = time.monotonic()
+        if text:
+            # whoever answers is waiting on GET /heard: wake them now rather than at their next look
+            self.heard_recent = (self.heard_recent + [{"t": entry["t"], "seconds": entry["seconds"], "text": text}])[-100:]
+            waiting, self.heard_event = self.heard_event, asyncio.Event()
+            waiting.set()
         d = self.device
         if d is not None and text:
             d.last_words = time.monotonic()
@@ -365,60 +449,103 @@ class Link:
         finally:
             self.waking = False
 
-    async def say(self, text: str, voice: str, emotion: str | None, wake: bool = False, wav: bytes | None = None):
+    async def say(self, text: str, voice: str, emotion: str | None, wake: bool = False, wav: bytes | None = None,
+                  whole: bool = False):
         self.saying += 1
         try:
-            return await self._say(text, voice, emotion, wake, wav)
+            return await self._say(text, voice, emotion, wake, wav, whole)
         finally:
             self.saying -= 1
 
-    async def _say(self, text: str, voice: str, emotion: str | None, wake: bool, wav: bytes | None = None):
-        # the words first: rendering is the slow part, so the channel is open for as short a time as can be.
-        # A saved clip is already rendered.
-        if wav is None:
-            wav = await self.speak_wav(text, voice)
-        packets = await asyncio.to_thread(wav_to_opus, wav)
-        woke = False
-        if self.device is None and wake:
-            await self.wake_device()
-            woke = True
-        async with self.say_lock:
-            d = self.device
-            if d is None:
-                raise web.HTTPConflict(text="the device has no audio channel open: wake it first")
-            d.speaking = True
+    async def _say(self, text: str, voice: str, emotion: str | None, wake: bool, wav: bytes | None = None,
+                   whole: bool = False):
+        """A line goes out a sentence at a time: the first is rendered and starts playing while the
+        rest are still being rendered behind it, so the room waits for one sentence, not the whole
+        line. whole: render it in one piece (one breath, the tone carried right through), and wait
+        for all of it. A saved clip is already rendered and is one piece."""
+        asked = time.monotonic()
+        pieces = [text] if (wav is not None or whole) else split_sentences(text)
+        ready: asyncio.Queue = asyncio.Queue()    # each piece's packets in order, then None; or what went wrong
+
+        async def render():
             try:
-                await self.send(d, {"type": "tts", "state": "start"})
-                if emotion:
-                    await self.send(d, {"type": "llm", "emotion": emotion, "text": ""})
-                # no text: spoken out loud, the words need no bubble, and the face gets the screen
-                await self.send(d, {"type": "tts", "state": "sentence_start"})
-                started = time.monotonic()
-                for i, packet in enumerate(packets):
-                    if not d.speaking:
-                        break
-                    await d.ws.send_bytes(packet)
-                    # a little ahead of real time, so the device's queue never runs dry
-                    lead = started + (i * FRAME_MS / 1000) - 0.2 - time.monotonic()
-                    if lead > 0:
-                        await asyncio.sleep(lead)
-                remaining = started + (len(packets) * FRAME_MS / 1000) - time.monotonic()
-                if remaining > 0 and d.speaking:
-                    await asyncio.sleep(remaining)
-                await self.send(d, {"type": "tts", "state": "stop"})
-            finally:
-                d.speaking = False
-                d.last_words = time.monotonic()
-                d.reset()
-            if woke or d.deaf:
-                if time.monotonic() - self.last_heard < LIVE_S:
-                    # he's talking to me: stay for an answer, then the usual hang-up applies
-                    d.deaf = False
-                    d.last_words = time.monotonic() - max(0, self.dead_air - REPLY_WINDOW_S)
-                else:
-                    await asyncio.sleep(0.5)    # the tail of the audio, still in the device's queue
-                    await d.ws.close()
-        return len(packets) * FRAME_MS / 1000
+                for piece in pieces:
+                    data = wav if wav is not None else await self.speak_wav(piece, voice)
+                    await ready.put(await asyncio.to_thread(wav_to_opus, data))
+                await ready.put(None)
+            except Exception as e:  # noqa: BLE001 - handed to the one speaking, who knows what's been said so far
+                await ready.put(e)
+
+        renderer = asyncio.create_task(render())
+        try:
+            # the first words first: rendering is the slow part, so the channel is open for as short a time as can be
+            packets = await ready.get()
+            if isinstance(packets, Exception):
+                raise packets
+            rendered_first = time.monotonic()
+            woke = False
+            if self.device is None and wake:
+                await self.wake_device()
+                woke = True
+            sent, first_audio, failed = 0, None, None
+            async with self.say_lock:
+                d = self.device
+                if d is None:
+                    raise web.HTTPConflict(text="the device has no audio channel open: wake it first")
+                d.speaking = True
+                try:
+                    await self.send(d, {"type": "tts", "state": "start"})
+                    if emotion:
+                        await self.send(d, {"type": "llm", "emotion": emotion, "text": ""})
+                    # no text: spoken out loud, the words need no bubble, and the face gets the screen
+                    await self.send(d, {"type": "tts", "state": "sentence_start"})
+                    next_at = time.monotonic()    # when the packet about to be sent is due to play
+                    while packets is not None and d.speaking:
+                        if time.monotonic() > next_at:
+                            next_at = time.monotonic()    # this piece wasn't ready in time: a pause, then on from now
+                        for packet in packets:
+                            if not d.speaking:
+                                break
+                            await d.ws.send_bytes(packet)
+                            if first_audio is None:
+                                first_audio = time.monotonic()
+                            sent += 1
+                            next_at += FRAME_MS / 1000
+                            # a little ahead of real time, so the device's queue never runs dry
+                            lead = next_at - 0.2 - time.monotonic()
+                            if lead > 0:
+                                await asyncio.sleep(lead)
+                        packets = await ready.get()
+                        if isinstance(packets, Exception):
+                            failed, packets = packets, None
+                    remaining = next_at - time.monotonic()
+                    if remaining > 0 and d.speaking:
+                        await asyncio.sleep(remaining)
+                    await self.send(d, {"type": "tts", "state": "stop"})
+                finally:
+                    d.speaking = False
+                    d.last_words = time.monotonic()
+                    d.reset()
+                if woke or d.deaf:
+                    if time.monotonic() - self.last_heard < LIVE_S:
+                        # he's talking to me: stay for an answer, then the usual hang-up applies
+                        d.deaf = False
+                        d.last_words = time.monotonic() - max(0, self.dead_air - REPLY_WINDOW_S)
+                    else:
+                        await asyncio.sleep(0.5)    # the tail of the audio, still in the device's queue
+                        await d.ws.close()
+            if first_audio is not None:
+                turn = self.clock.said(asked=asked, rendered_first=rendered_first, first_audio=first_audio,
+                                       done=time.monotonic(), pieces=len(pieces), chars=len(text),
+                                       audio_s=sent * FRAME_MS / 1000, woke=woke, clip=wav is not None)
+                log.info("said %s piece(s), %.1fs: first sound %d ms after the words arrived%s", len(pieces), turn["audio_s"],
+                         turn["to_first_sound_ms"],
+                         f", {turn['last_word_to_first_sound_ms']} ms after he stopped talking" if "answers" in turn else "")
+            if failed is not None:
+                raise failed    # part of the line was said; the rest couldn't be rendered
+            return sent * FRAME_MS / 1000
+        finally:
+            renderer.cancel()
 
     # -- routes ---------------------------------------------------------------------------
 
@@ -711,14 +838,15 @@ class Link:
         d.deaf = self.waking      # set before anything can arrive from this device
         self.device = d
         log.info("device connected: %s", request.headers.get("Device-Id", "?"))
+        asyncio.create_task(self.warm())
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.BINARY:
                     if d.speaking or d.deaf:
                         continue
-                    done = d.feed(msg.data)
+                    done = d.feed(msg.data, self.end_silence_ms)
                     if done is not None:
-                        asyncio.create_task(self.hear(done))
+                        asyncio.create_task(self.hear(done, time.monotonic(), d.ended_quiet_ms))
                 elif msg.type == WSMsgType.TEXT:
                     await self.on_json(d, json.loads(msg.data))
                 elif msg.type == WSMsgType.ERROR:
@@ -760,8 +888,40 @@ class Link:
         text = (body.get("text") or "").strip()
         if not text:
             raise web.HTTPBadRequest(text="no text")
-        seconds = await self.say(text, body.get("voice") or self.args.voice, body.get("emotion"), bool(body.get("wake")))
+        seconds = await self.say(text, body.get("voice") or self.args.voice, body.get("emotion"), bool(body.get("wake")),
+                                 whole=bool(body.get("whole")))
         return web.json_response({"ok": True, "seconds": seconds})
+
+    async def heard_route(self, request):
+        """GET /heard?after=<t>&wait=<seconds>: what was heard after time t (an entry's own "t"), for
+        whoever answers. With wait, an empty answer is held until something is heard or the wait runs
+        out (30 s at most), so the words arrive the moment they're transcribed and nobody has to keep
+        looking. after=0 answers at once with what's been heard since this server started, to begin from."""
+        self.authorized(request)
+        try:
+            after = float(request.query.get("after", "0") or 0)
+            wait = max(0.0, min(30.0, float(request.query.get("wait", "0") or 0)))
+        except ValueError:
+            raise web.HTTPBadRequest(text="after is a time and wait is seconds, both numbers")
+
+        def new():
+            return [e for e in self.heard_recent if e["t"] > after]
+
+        entries = new()
+        if not entries and wait > 0 and after > 0:
+            try:
+                await asyncio.wait_for(self.heard_event.wait(), wait)
+            except asyncio.TimeoutError:
+                pass
+            entries = new()
+        return web.json_response({"entries": entries, "now": time.time(),
+                                  "last": self.heard_recent[-1]["t"] if self.heard_recent else after})
+
+    async def voice_timing(self, request):
+        """GET /api/voice-timing: how long each leg of the recent turns took (timing.py). No words."""
+        self.authorized(request)
+        return web.json_response({"turns": self.clock.recent(), "end_silence_ms": self.end_silence_ms,
+                                  "end_silence_range": list(END_SILENCE_RANGE)})
 
     def clip(self, name: str) -> bytes:
         if not re.fullmatch(r"[A-Za-z0-9_\-]+", name or ""):
@@ -1006,6 +1166,9 @@ def make_app(link: "Link", viewer_html: str = "") -> web.Application:
     app.router.add_get("/", link.root)
     app.router.add_get("/api/about", link.about)
     app.router.add_get("/api/logs", link.logs)
+    app.router.add_get("/heard", link.heard_route)
+    app.router.add_get("/api/voice-timing", link.voice_timing)
+    Bench(link, STATE).add_routes(app)
     if viewer_html:
         async def viewer(request):
             return web.Response(text=viewer_html, content_type="text/html",
