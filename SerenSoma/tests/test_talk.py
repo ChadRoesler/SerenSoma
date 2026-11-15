@@ -321,3 +321,14 @@ def test_stop_said_aloud_ends_back_and_forth_and_isnt_passed_on_to_be_answered(t
         return closed.type, talk["on"], heard["entries"]
     closed, on, entries = _with_speech(tmp_path, go, heard_text="Alright, stop it.")
     assert closed in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED) and on is False and entries == []
+
+
+def test_never_is_never_however_recently_the_box_started(tmp_path, monkeypatch):
+    """time.monotonic() counts from when the box started. On one that has been up for a minute, a time
+    kept as 0.0 reads as a minute ago: the warm-up was skipped and a first line was taken for a reply."""
+    async def go(client, auth, link, rt, spoken):
+        return link.speech_used, link.last_heard
+    used, heard = _with_speech(tmp_path, go)
+    for just_booted in (0.5, 40.0, 100000.0):
+        assert just_booted - used > voice.WARM_AFTER_S          # so the voice is warmed
+        assert not just_booted - heard < voice.LIVE_S           # and nobody is taken to have just spoken

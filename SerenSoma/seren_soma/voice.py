@@ -134,6 +134,10 @@ MAX_UTTERANCE_S = 20
 # rendered and a moment of quiet transcribed, and both are loaded by the time anyone speaks.
 WARM_AFTER_S = 90
 WARM_LINE = "Okay."
+# "It has never happened", for a time kept on time.monotonic(). That clock starts near zero when the
+# box does, so 0.0 means "at boot", and for the first minutes a box is up that is recent. A CI runner is
+# always a box that just started: on 14 Nov 2026 the warm-up never ran there, because 0.0 was 40 seconds ago.
+NEVER = float("-inf")
 # Back and forth: for a while, the robot keeps listening and the voice stays loaded, so a reply is a
 # second away and the next thing said needs no tap. The voice is kept up with a lease on the speech
 # service's speaker, in a name of its own: /speak takes and drops a lease in its caller's name on every
@@ -367,7 +371,10 @@ class Link:
         self.http: ClientSession | None = None
         self.say_lock = asyncio.Lock()
         self.saying = 0      # replies being rendered or spoken: the channel stays up for them
-        self.last_heard = 0.0  # when someone last said real words: within LIVE_S, we're mid-conversation
+        # When someone last said real words: within LIVE_S, we're mid-conversation. NEVER is not 0: the
+        # clock these are measured on (time.monotonic) counts from when the box started, so on a box up
+        # for under three minutes 0 looked like "a moment ago".
+        self.last_heard = NEVER
         self.waking = False
         self.settings = load_settings(getattr(args, "idle_close", None))
         self.feed = []              # recent touches for the console: what the hand did, what it was read as, what showed
@@ -378,7 +385,7 @@ class Link:
         self.clock = VoiceClock()   # how long each leg of a turn took (timing.py); no words in it
         self.heard_recent = []      # what was heard since this server started, for GET /heard
         self.heard_event = asyncio.Event()  # set, and replaced, each time something is heard
-        self.speech_used = 0.0      # when the speech service last rendered or transcribed for us (monotonic)
+        self.speech_used = NEVER    # when the speech service last rendered or transcribed for us (monotonic)
         self.talk_until = 0.0       # back and forth is on until this time (wall clock); 0 is off
         self.talk_task = None
         self.talk_voice = ""        # what holding the voice last came to: "held", or why not
