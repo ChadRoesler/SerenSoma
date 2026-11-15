@@ -425,10 +425,35 @@ back. Leave it out to hold steady. The LEDs take 5 bits of red and blue and 6 of
 green, so a dim pulse has few steps to work with; higher brightness breathes smoother.
 
 `brightness` is 0 to 100 and defaults to 40. The color fades in over 300 ms on LEDs
-2-5 and 8-11, and a pose with no `lights` fades them out. LEDs 0, 1, 6 and 7 stay
-free for the green, blue and red status lights, which sit above everything else on
+2 to 9, and a pose with no `lights` fades them out. LEDs 0, 1, 10 and 11, the front two
+on each side, stay free for the green, blue and red status lights, which sit above everything else on
 the rails. A face with no `lights` at all never touches them. LEDs mix color
 differently from a screen, so judge it on the robot with **Try this pose**.
+
+### Layer order
+
+What is drawn over what. By default, over the base image: the brows, the eyes, the mouth, the hair,
+then a pose's decorators (and the brows after the eyes when `brows_above_eyes` is set). A face can
+give its own order, bottom to top:
+
+```yaml
+face:
+  layers: [brows, eyes, mouth, "dec:blush", hair, "brow:left", decorators]
+```
+
+- `brows`, `eyes`, `mouth`, `hair` are the parts. `eyes` is each whole eye (white, iris and lids);
+  nothing is ordered inside it.
+- `decorators` is where a pose's decorators go, in the pose's own order.
+- `dec:<name>` gives one decorator a place of its own, wherever a pose shows it. The petting heart
+  and blush are the face's `heart` and `blush` decorators, so they can be placed the same way.
+- `brow:left` and `brow:right` give one brow a place of its own. `brows` places both; a brow named
+  on its own goes there instead.
+
+The builder writes the resolved list into `face.json` as a top-level `layers`, only when the face
+gave one, so a face without one is what it always was. On the robot each part is a single object,
+and the list is only the order they sit in; the speech bubble stays above all of it. Firmware older
+than 13 Nov 2026 ignores the list and uses `brows.aboveEyes`, which the builder still derives from
+it.
 
 ### Sounds
 
@@ -452,6 +477,22 @@ ffmpeg -i gasp.wav -ac 1 -c:a libopus -b:a 24k gasp.ogg
 - They load into PSRAM at boot with the rest of the face (the card can only be read then). `GET /api/touch-spots`
   lists them as `sounds`; `POST /api/sound {"name": "gasp"}` plays one. One at a time, and never over a reply
   being spoken (that's a 409).
+
+### The robot's own prompts
+
+The robot's stock prompts are clips built into the firmware. A face can say one of them its own
+way: a sound named `upgrade` plays in place of "upgrading the system" when new firmware goes in.
+Give several, named `upgrade_1`, `upgrade_2` and so on, and one is picked at random each time.
+
+```yaml
+sounds:
+  upgrade_1: sounds/upgrade_1.ogg
+  upgrade_2: sounds/upgrade_2.ogg
+```
+
+With no such sound the stock clip plays, so nobody's voice is built into the firmware. Keep each
+under about 4 seconds: the robot stops its audio for the download 4.5 seconds after it starts
+speaking. `upgrade` is the only prompt that can be replaced so far.
 
 ## Emotions
 

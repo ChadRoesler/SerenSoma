@@ -88,6 +88,14 @@ class SomaConfig:
     idle_close_seconds: float = 60.0    # where the dead-air timer starts; after that it's a live setting (/settings)
     updates: bool = True       # "is there a newer seren-soma", checked against PyPI
     firmware_repo: str = "ChadRoesler/SerenSoma"   # where fw-v* releases come from (GitHub owner/repo)
+    # Who keeps the back and forth. "own": this server does, as it always has. "lodestar": Lodestar
+    # does, and this server is only the robot's ears and mouth (relay.py). A prototype; own is the default.
+    conversation: str = "own"
+    mouth: str = "soma"        # this body's name to Lodestar, when Lodestar keeps the conversation
+    # What the one who answers through this body is called, as it's said out loud ("Juno", or
+    # "Juno, June"). Only so that a stop addressed by name ("okay Juno, that's enough") is heard as one.
+    # Nothing here knows who that is; blank is fine.
+    partner: str = ""
     robot: RobotConfig = field(default_factory=RobotConfig)
     lodestar: LodestarConfig = field(default_factory=LodestarConfig)
 
@@ -129,6 +137,7 @@ class SomaConfig:
             robot_token=self.robot.auth.resolve(self.state / "control_token"), device_from=device_from,
             robot_token_file=_robot_token_file_for(self.robot.auth, self.state),
             state=self.state, firmware_repo=self.firmware_repo,
+            conversation=self.conversation, mouth=self.mouth, partner=self.partner,
             lodestar_url=lodestar_url.rstrip("/"), lodestar_token=lodestar_token)
 
 
@@ -192,6 +201,10 @@ def load_config(path: Optional[str] = None) -> SomaConfig:
     cfg.advertise = str(d.get("advertise") or "")
     cfg.voice = str(d.get("voice") or cfg.voice)
     cfg.firmware_repo = str(d.get("firmware_repo") or cfg.firmware_repo)
+    kept = str(d.get("conversation") or cfg.conversation).strip().lower()
+    cfg.conversation = kept if kept in ("own", "lodestar") else "own"
+    cfg.mouth = str(d.get("mouth") or cfg.mouth).strip().lower() or "soma"
+    cfg.partner = str(d.get("partner") or "")
     up = d.get("updates")
     cfg.updates = bool(up.get("enabled", True)) if isinstance(up, dict) else (bool(up) if up is not None else True)
     try:

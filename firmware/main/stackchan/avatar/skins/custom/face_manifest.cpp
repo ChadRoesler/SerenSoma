@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include <string_view>
 #include "custom.h"
 #include <assets/assets.h>
 #include <assets.h>
@@ -415,10 +416,27 @@ FaceManifest_t FaceManifest_t::load()
         ArduinoJson::serializeJson(buildups, manifest.buildups);
     }
 
+    // The face's own layer order, as it came: read here, applied when the face is built. Tokens this
+    // firmware doesn't know are kept and simply never matched, so a newer builder can send more.
+    auto layers = doc["layers"];
+    if (layers.is<ArduinoJson::JsonArray>()) {
+        for (auto v : layers.as<ArduinoJson::JsonArray>()) {
+            const std::string token = read_string(v);
+            if (!token.empty() && token.size() <= 48 && manifest.layers.size() < 64) {
+                manifest.layers.push_back(token);
+            }
+        }
+    }
+
     auto head = doc["head"];
     if (head.is<ArduinoJson::JsonObject>()) {
-        manifest.headDeclared = true;
         for (auto kv : head.as<ArduinoJson::JsonObject>()) {
+            // "shake" lives in this map but isn't a touch: a face that only says what a shake shows
+            // hasn't taken over its head touches, and keeps the stock petting and the voice server's
+            // own reactions. Until 13 Nov 2026 any head map at all switched those off.
+            if (std::string_view(kv.key().c_str()) != "shake") {
+                manifest.headDeclared = true;
+            }
             HeadTouch_t touch;
             touch.pose = read_string(kv.value()["pose"]);
             touch.ms   = clamp(read_int(kv.value()["ms"], 2000), 200, 15000);

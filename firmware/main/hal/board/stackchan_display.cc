@@ -18,6 +18,7 @@
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 #include <hal/touch_log.h>
+#include <hal/rails.h>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -379,11 +380,11 @@ void StackChanAvatarDisplay::LvglUnlock()
     Unlock();
 }
 
-// The status light, shown on both sides: LEDs 0-5 are one strip and 6-11 the other.
+// The status light, shown at the front on both sides (hal/rails.h says which LEDs those are).
 // Held, so a mood or a light show can't hide whether the mic is open. Black lets go.
 static void set_status_light(uint8_t r, uint8_t g, uint8_t b)
 {
-    for (uint8_t led : {0, 6}) {
+    for (uint8_t led : rails::kStatusLeds) {
         if (r || g || b) {
             GetHAL().holdRgb(led, r, g, b);
         } else {

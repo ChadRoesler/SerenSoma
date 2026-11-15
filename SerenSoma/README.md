@@ -31,6 +31,13 @@ how many words, never which. The quiet that ends a turn is a live setting there
 (`channel.end_silence_ms`, 900 by default). When the robot opens its channel after the speech service
 has sat idle, a throwaway line is rendered so the voice is loaded before anyone needs it.
 
+**Who keeps the conversation** (a prototype). By default this server does. With `conversation: lodestar`
+in the config, Lodestar keeps it, once, for every place a conversation happens, and this server is only
+the robot's ears and mouth: it hands finished clips to Lodestar, pulls the sound to play from it, and
+keeps the microphone (who may open it, the tap, Stop). Lodestar's clock is then the only one: when
+Lodestar says back and forth is over, or forgets it in a restart, the microphone closes. The routes
+above pass through to Lodestar, so nothing that talks to this server changes. See `seren_soma/relay.py`.
+
 Copy [`seren-soma.yaml.sample`](seren-soma.yaml.sample) to `~/seren-soma/seren-soma.yaml`.
 Everything it keeps is in the state folder, `~/seren-soma/state/` by default: its two tokens, the
 robot's control token, what was heard, the touch log, the settings and its own log.

@@ -607,7 +607,7 @@ async function screenRound() {
 
 // -- the lights --
 const LD = { shown: Array(12).fill("000000"), walking: false };
-const KEPT = [0, 1, 6, 7];    // the robot's own: microphone, reply and camera lights
+const KEPT = [0, 1, 10, 11];  // the robot's own, the front two on each side: microphone, reply and camera lights
 
 function ledColor() {
   const v = $("ldColor").value, part = i => Math.min(168, parseInt(v.slice(i, i + 2), 16));

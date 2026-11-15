@@ -22,6 +22,7 @@
 #include "stackchan_camera.h"
 #include "hal_bridge.h"
 #include <hal/hal.h>
+#include <hal/rails.h>
 
 #define TAG "M5Stack-StackChan-Board"
 
@@ -781,11 +782,12 @@ i2c_master_bus_handle_t hal_bridge::board_get_i2c_bus()
     return board.GetI2cBus();
 }
 
-// The red light: the second LED of each strip, so it can show beside the mic or reply light.
+// The red light: the second LED from the front on each side, so it can show beside the mic or reply
+// light (hal/rails.h says which LEDs those are).
 static void set_camera_light(bool on)
 {
     // held: nothing else that writes to the rails can put this one out while the sensor is on
-    for (uint8_t led : {1, 7}) {
+    for (uint8_t led : rails::kCameraLeds) {
         if (on) {
             GetHAL().holdRgb(led, 50, 0, 0);
         } else {

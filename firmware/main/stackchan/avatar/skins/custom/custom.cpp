@@ -5,9 +5,12 @@
  */
 #include "custom.h"
 #include "../../../utils/random.h"
+#include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <cstring>
 #include <hal/hal.h>
+#include <hal/rails.h>
 #include <assets/assets.h>
 #include <mooncake_log.h>
 #include <esp_heap_caps.h>
@@ -203,6 +206,10 @@ bool CustomAvatar::init(lv_obj_t* parent, const lv_font_t* font)
         return false;
     }
 
+    if (!_manifest.layers.empty()) {
+        restackLayers(left_eye->obj(), right_eye->obj(), mouth->obj());
+    }
+
     _key_elements.leftEye  = std::move(left_eye);
     _key_elements.rightEye = std::move(right_eye);
     _key_elements.mouth    = std::move(mouth);
@@ -255,8 +262,130 @@ void CustomAvatar::applyDecorators(const std::vector<std::string>& names)
             continue;
         }
         const auto& spec = it->second;
-        _emotion_decorator_ids.push_back(
-            addDecorator(std::make_unique<SpriteDecorator>(_pannel->get(), spec, anchorFor(spec.anchor))));
+        auto decorator   = std::make_unique<SpriteDecorator>(_pannel->get(), spec, anchorFor(spec.anchor));
+        lv_obj_t* made   = decorator->obj();
+        _emotion_decorator_ids.push_back(addDecorator(std::move(decorator)));
+        placeDecorator(made, name);
+    }
+}
+
+/*
+ * A face's own layer order.
+ *
+ * Every part of the face is one object on the panel, and what's drawn over what is only the order
+ * they sit in there. So an order is applied by moving them: the fixed parts once, when the face is
+ * built, and each decorator when it is made. A rank is twice a token's place in the list plus two,
+ * which leaves 0 for the base image and the odd numbers for a part the list left out.
+ */
+int CustomAvatar::layerRank(const std::string& token) const
+{
+    const auto& layers = _manifest.layers;
+    for (size_t i = 0; i < layers.size(); i++) {
+        if (layers[i] == token) {
+            return static_cast<int>(i) * 2 + 2;
+        }
+    }
+    // Left out of the list: straight after whatever is usually under it. The builder always sends all
+    // five, so this is for a list written by hand.
+    static const char* const kUsual[] = {"brows", "eyes", "mouth", "hair", "decorators"};
+    int usual = -1;
+    for (int i = 0; i < 5; i++) {
+        if (token == kUsual[i]) {
+            usual = i;
+        }
+    }
+    for (int below = usual - 1; below >= 0; below--) {
+        for (size_t i = 0; i < layers.size(); i++) {
+            if (layers[i] == kUsual[below]) {
+                return static_cast<int>(i) * 2 + 3;
+            }
+        }
+    }
+    return 1;
+}
+
+void CustomAvatar::restackLayers(lv_obj_t* leftEye, lv_obj_t* rightEye, lv_obj_t* mouth)
+{
+    auto listed = [this](const char* token) {
+        for (const auto& t : _manifest.layers) {
+            if (t == token) {
+                return true;
+            }
+        }
+        return false;
+    };
+    struct Part {
+        lv_obj_t* obj;
+        int rank;
+    };
+    // "brows" places both; a brow the list names on its own goes there instead
+    const int brows = layerRank("brows");
+    std::vector<Part> parts = {
+        {_left_brow ? _left_brow->obj() : nullptr, listed("brow:left") ? layerRank("brow:left") : brows},
+        {_right_brow ? _right_brow->obj() : nullptr, listed("brow:right") ? layerRank("brow:right") : brows},
+        {leftEye, layerRank("eyes")},
+        {rightEye, layerRank("eyes")},
+        {mouth, layerRank("mouth")},
+        {_overlay ? _overlay->get() : nullptr, layerRank("hair")},
+    };
+    std::stable_sort(parts.begin(), parts.end(), [](const Part& a, const Part& b) { return a.rank < b.rank; });
+
+    _layer_rank.clear();
+    int32_t index = 0;
+    if (_base) {
+        _layer_rank[_base->get()] = 0;
+        index                    = 1;
+    }
+    for (const auto& part : parts) {
+        if (part.obj == nullptr) {
+            continue;  // a face with no brows, or no hair
+        }
+        lv_obj_move_to_index(part.obj, index++);
+        _layer_rank[part.obj] = part.rank;
+    }
+    mclog::tagInfo(_tag, "layers: the face orders its own, {} tokens", _manifest.layers.size());
+}
+
+void CustomAvatar::placeDecorator(lv_obj_t* obj, const std::string& name)
+{
+    if (_manifest.layers.empty() || obj == nullptr || !_pannel) {
+        return;  // no order given: it stays where it was made, on top, as always
+    }
+    lv_obj_t* panel      = _pannel->get();
+    const uint32_t count = lv_obj_get_child_count(panel);
+
+    // decorators come and go; forget the ones that are gone before the list grows without end
+    if (_layer_rank.size() > 48) {
+        for (auto it = _layer_rank.begin(); it != _layer_rank.end();) {
+            bool here = false;
+            for (uint32_t i = 0; i < count && !here; i++) {
+                here = lv_obj_get_child(panel, i) == it->first;
+            }
+            it = here ? std::next(it) : _layer_rank.erase(it);
+        }
+    }
+
+    // its own place if the face gave it one, else with the rest of the decorators
+    const std::string own = "dec:" + name;
+    bool placed           = false;
+    for (const auto& t : _manifest.layers) {
+        placed = placed || t == own;
+    }
+    const int rank   = layerRank(placed ? own : "decorators");
+    _layer_rank[obj] = rank;
+
+    // It was just made, so it is last. Put it under the first thing that belongs above it; among
+    // decorators of the same place the later one stays on top, which is the pose's own order.
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t* child = lv_obj_get_child(panel, i);
+        if (child == obj) {
+            continue;
+        }
+        const auto known = _layer_rank.find(child);
+        if (known == _layer_rank.end() || known->second > rank) {
+            lv_obj_move_to_index(obj, static_cast<int32_t>(i));
+            return;
+        }
     }
 }
 
@@ -339,7 +468,12 @@ int CustomAvatar::addNamedDecorator(const std::string& name, uint32_t lifetimeMs
         spec.lifetimeMs = lifetimeMs;
     }
 
-    return addDecorator(std::make_unique<SpriteDecorator>(_pannel->get(), spec, anchorFor(spec.anchor)));
+    // the petting heart, the blush: the face's decorators by name, so they keep the face's order too
+    auto decorator = std::make_unique<SpriteDecorator>(_pannel->get(), spec, anchorFor(spec.anchor));
+    lv_obj_t* made = decorator->obj();
+    const int id   = addDecorator(std::move(decorator));
+    placeDecorator(made, name);
+    return id;
 }
 
 bool CustomAvatar::setEmotionByName(const std::string& emotion)
@@ -567,7 +701,7 @@ void CustomAvatar::tickLights(uint32_t nowMs)
     if (sameOnLeds && _light_fading) {
         return;
     }
-    for (uint8_t led : {2, 3, 4, 5, 8, 9, 10, 11}) {
+    for (uint8_t led : rails::kMoodLeds) {
         GetHAL().setRgbColor(led, _light_now[0], _light_now[1], _light_now[2]);
     }
     GetHAL().refreshRgb();

@@ -16,6 +16,12 @@ state_dir: ~/seren-soma/state
 
 # voice: ""               # the voice Lodestar speaks in; blank: Lodestar's default
 idle_close_seconds: 60     # the dead-air timer to start with: no words this long hangs up. Change it live on the page.
+# conversation: own        # who keeps the back and forth. own: this server, as always. lodestar: Lodestar keeps it
+#                          # and this server is only the robot's ears and mouth. A prototype: it needs a Lodestar
+#                          # that has the talk routes (/api/v1/talk/...).
+# mouth: soma              # this body's name to Lodestar, when Lodestar keeps the conversation
+# partner: ""              # what you call whoever answers through this body, as you say it ("Juno"), so that
+#                          # "okay Juno, that's enough" is heard as a stop. Blank: only the bare phrases count.
 
 robot:
   url: http://192.0.2.21:8080   # required: the robot's control API (its screen shows the address)

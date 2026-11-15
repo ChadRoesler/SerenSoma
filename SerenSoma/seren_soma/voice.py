@@ -27,6 +27,7 @@ import numpy as np
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, WSMsgType, web
 
 from .bench import Bench
+from .relay import LodestarLoop
 from .timing import VoiceClock
 from .touch_read import HEAD_KINDS, TouchReader, in_window, label_scratching, reaction_for, scritching
 
@@ -190,6 +191,37 @@ def lodestar_from_symposium(path: Path) -> tuple[str, str]:
 # the end follows. "3.5" and "e.g" stay whole; "Mr. Smith" splits, and that's fine for speech.
 SENTENCE = re.compile(r'''.+?(?:[.!?…]+["')\]]*(?=\s|$)|$)''', re.S)
 SHORT_PIECE = 12
+# A first sentence longer than this is cut at its first clause break (a comma, semicolon, colon or
+# dash) so there's something short to say at once. Rendering runs at about the speed of speech, so the
+# room waits as long as the first piece takes to say: on 13 Nov 2026 a quick mind answered in 1.4 s
+# and then its 70-character opening sentence took 3 s to render, the longest leg of the turn.
+FIRST_PIECE_MAX = 45
+CLAUSE_BREAK = re.compile(r"[,;:]\s|\s[—–-]\s")
+
+# Said on its own during back and forth, one of these ends it and closes the microphone, the same as
+# a tap or the Stop button. The whole utterance has to be the phrase (after an "alright" or "okay"):
+# "oh, stop it" in the middle of banter isn't an order. Whoever answers has a name, and people say it
+# ("okay Juno, that's enough"): the names are the person's to give (`partner:` in the config), never
+# written in here.
+STOP_PHRASES = {"stop", "stop it", "stop listening", "that's enough", "thats enough", "shut it down", "mic off",
+                "ears off", "go to sleep", "we're done", "were done", "end it"}
+STOP_LEAD = {"alright", "all", "right", "okay", "ok", "hey", "now", "please", "well", "and", "so"}
+STOP_TAIL = {"please", "now"}
+
+
+def spoken_names(names: str) -> frozenset:
+    """The config's `partner:` as the words someone would say: "Juno", or "Juno, June" for two."""
+    return frozenset(w for w in re.sub(r"[^a-z' ]", " ", (names or "").lower()).split() if w)
+
+
+def is_stop(text: str, names=frozenset()) -> bool:
+    """names: what the one answering is called, as words, so a stop addressed to them by name counts."""
+    words = re.sub(r"[^a-z' ]", " ", text.lower().replace("’", "'")).split()
+    while words and (words[0] in STOP_LEAD or words[0] in names):
+        words.pop(0)
+    while words and (words[-1] in STOP_TAIL or words[-1] in names):
+        words.pop()
+    return " ".join(words) in STOP_PHRASES
 
 
 def split_sentences(text: str) -> list[str]:
@@ -198,6 +230,10 @@ def split_sentences(text: str) -> list[str]:
     own tone joins the one before."""
     parts = [m.group(0).strip() for m in SENTENCE.finditer(text.strip())]
     parts = [x for x in parts if x]
+    if parts and len(parts[0]) > FIRST_PIECE_MAX:
+        cuts = [m.end() for m in CLAUSE_BREAK.finditer(parts[0]) if SHORT_PIECE <= m.end() <= FIRST_PIECE_MAX + 15]
+        if cuts:
+            parts[0:1] = [parts[0][:cuts[0]].strip(), parts[0][cuts[0]:].strip()]
     out: list[str] = []
     for part in parts:
         if len(out) > 1 and len(part) < SHORT_PIECE:
@@ -347,6 +383,8 @@ class Link:
         self.talk_task = None
         self.talk_voice = ""        # what holding the voice last came to: "held", or why not
         self.wake_deaf = True       # a channel this server opens is deaf, unless it's opened to listen
+        # Lodestar keeps the conversation (relay.py), or None: this server keeps it itself
+        self.loop = LodestarLoop(self, getattr(args, "mouth", "soma")) if getattr(args, "conversation", "own") == "lodestar" else None
         HEARD_DIR.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -364,7 +402,7 @@ class Link:
 
     async def warm(self):
         """Load the voice and the ears before they're needed (see WARM_AFTER_S). Never raises."""
-        if time.monotonic() - self.speech_used < WARM_AFTER_S:
+        if self.loop is not None or time.monotonic() - self.speech_used < WARM_AFTER_S:
             return
         self.speech_used = time.monotonic()    # now, so two openings in a row warm once
         started = time.monotonic()
@@ -398,6 +436,8 @@ class Link:
         """detected: when the utterance was called finished (time.monotonic()). quiet_ms: how much quiet
         that took, so the talking stopped at detected - quiet_ms."""
         detected = time.monotonic() if detected is None else detected
+        if self.loop is not None:
+            return await self.loop.hear(pcm, detected, quiet_ms)
         name = time.strftime("%Y%m%d-%H%M%S")
         data = wav_bytes(pcm, IN_RATE)
         path = HEARD_DIR / f"{name}.wav"
@@ -432,6 +472,11 @@ class Link:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         log.info("heard (%ss): %s", entry["seconds"], text)
         self.last_heard = time.monotonic()
+        if text and self.talking() and is_stop(text, spoken_names(getattr(self.args, "partner", ""))):
+            # an order to this server, not something to answer: it isn't handed on to whoever is answering
+            log.info("back and forth: told to stop out loud")
+            await self.stop_talking()
+            return
         if text:
             # whoever answers is waiting on GET /heard: wake them now rather than at their next look
             self.heard_recent = (self.heard_recent + [{"t": entry["t"], "seconds": entry["seconds"], "text": text}])[-100:]
@@ -484,6 +529,8 @@ class Link:
     async def keep_talking(self):
         """While back and forth is on: hold the voice loaded, and open the channel again, listening,
         whenever it has closed. When it ends, by the clock or by being turned off, let the voice go."""
+        if self.loop is not None:
+            return await self.loop.keep_talking()
         renew_at = 0.0
         try:
             while self.talking():
@@ -513,6 +560,27 @@ class Link:
                 pass
             log.info("back and forth: off")
 
+    async def stop_talking(self, tell: bool = True, cut: bool = False):
+        """End back and forth and close the microphone, now: the Stop button, and "stop it" said aloud.
+        Until 13 Nov 2026 stopping only handed the channel back to the dead-air timer, and in a room
+        with any talk in it that timer never runs out. tell: when Lodestar keeps the conversation, let
+        it know (False when it was Lodestar that said so). cut: stop the line being spoken too."""
+        self.talk_until = 0.0                  # first, so the keeper going out finds nothing left to end
+        if self.talk_task is not None:
+            self.talk_task.cancel()
+            self.talk_task = None
+        if self.loop is not None:
+            self.loop.drop_waiting()
+            if tell:
+                await self.loop.tell_off()
+        d = self.device
+        if d is not None:
+            d.hang_up = True                   # for a line still being spoken: closed as soon as it ends
+            if cut:
+                d.speaking = False             # the one sending the sound sees this and stops
+            if not d.speaking and not self.saying:
+                await self.hang_up(d)
+
     def talk_state(self) -> dict:
         d = self.device
         return {"on": self.talking(), "until": self.talk_until if self.talking() else None, "voice": self.talk_voice,
@@ -520,6 +588,8 @@ class Link:
                 "minutes_range": list(TALK_MINUTES)}
 
     async def talk_get(self, request):
+        if self.loop is not None:
+            return await self.loop.talk_get(request)
         self.authorized(request)
         return web.json_response(self.talk_state())
 
@@ -527,6 +597,8 @@ class Link:
         """POST /talk {"minutes": 30} turns back and forth on for that long (again, to extend it);
         {"on": false} turns it off. While it's on the robot's microphone is open: that is the point,
         and why it always has an end."""
+        if self.loop is not None:
+            return await self.loop.talk_post(request)
         self.authorized(request)
         try:
             body = await request.json()
@@ -535,17 +607,7 @@ class Link:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="expected a JSON object")
         if body.get("on") is False:
-            if self.talk_task is not None:
-                self.talk_task.cancel()
-                self.talk_task = None
-            self.talk_until = 0.0
-            # Stop means the microphone stops, now. Until 13 Nov 2026 it only handed the channel back to
-            # the dead-air timer, and in a room with any talk in it that timer never runs out.
-            d = self.device
-            if d is not None:
-                d.hang_up = True                   # for a line still being spoken: closed as soon as it ends
-                if not d.speaking and not self.saying:
-                    await self.hang_up(d)
+            await self.stop_talking()
             return web.json_response(self.talk_state())
         minutes = body.get("minutes")
         lo, hi = TALK_MINUTES
@@ -558,29 +620,39 @@ class Link:
         return web.json_response(self.talk_state())
 
     async def say(self, text: str, voice: str, emotion: str | None, wake: bool = False, wav: bytes | None = None,
-                  whole: bool = False):
+                  whole: bool = False, feed=None, on_sent=None):
         self.saying += 1
         try:
-            return await self._say(text, voice, emotion, wake, wav, whole)
+            return await self._say(text, voice, emotion, wake, wav, whole, feed, on_sent)
         finally:
             self.saying -= 1
 
     async def _say(self, text: str, voice: str, emotion: str | None, wake: bool, wav: bytes | None = None,
-                   whole: bool = False):
+                   whole: bool = False, feed=None, on_sent=None):
         """A line goes out a sentence at a time: the first is rendered and starts playing while the
         rest are still being rendered behind it, so the room waits for one sentence, not the whole
         line. whole: render it in one piece (one breath, the tone carried right through), and wait
-        for all of it. A saved clip is already rendered and is one piece."""
+        for all of it. A saved clip is already rendered and is one piece.
+
+        feed: the line arrives already rendered, a WAV at a time, from somewhere else (Lodestar, when
+        it keeps the conversation: relay.py). on_sent(index, first_audio) is awaited as each of its
+        pieces has gone to the robot, so whoever sent it can be told."""
         asked = time.monotonic()
-        answering = self.clock.claim()    # what this is a reply to, if anything: decided now, not when it's done
-        pieces = [text] if (wav is not None or whole) else split_sentences(text)
+        # what this is a reply to, if anything: decided now, not when it's done. A fed line is timed
+        # by whoever feeds it.
+        answering = self.clock.claim() if feed is None else None
+        pieces = [text] if (wav is not None or whole or feed is not None) else split_sentences(text)
         ready: asyncio.Queue = asyncio.Queue()    # each piece's packets in order, then None; or what went wrong
 
         async def render():
             try:
-                for piece in pieces:
-                    data = wav if wav is not None else await self.speak_wav(piece, voice)
-                    await ready.put(await asyncio.to_thread(wav_to_opus, data))
+                if feed is not None:
+                    async for data in feed:
+                        await ready.put(await asyncio.to_thread(wav_to_opus, data))
+                else:
+                    for piece in pieces:
+                        data = wav if wav is not None else await self.speak_wav(piece, voice)
+                        await ready.put(await asyncio.to_thread(wav_to_opus, data))
                 await ready.put(None)
             except Exception as e:  # noqa: BLE001 - handed to the one speaking, who knows what's been said so far
                 await ready.put(e)
@@ -609,6 +681,7 @@ class Link:
                     # no text: spoken out loud, the words need no bubble, and the face gets the screen
                     await self.send(d, {"type": "tts", "state": "sentence_start"})
                     next_at = time.monotonic()    # when the packet about to be sent is due to play
+                    piece_index = 0
                     while packets is not None and d.speaking:
                         if time.monotonic() > next_at:
                             next_at = time.monotonic()    # this piece wasn't ready in time: a pause, then on from now
@@ -624,6 +697,9 @@ class Link:
                             lead = next_at - 0.2 - time.monotonic()
                             if lead > 0:
                                 await asyncio.sleep(lead)
+                        if on_sent is not None and d.speaking:
+                            await on_sent(piece_index, first_audio)
+                        piece_index += 1
                         packets = await ready.get()
                         if isinstance(packets, Exception):
                             failed, packets = packets, None
@@ -637,20 +713,20 @@ class Link:
                     d.reset()
                 if woke or d.deaf:
                     if time.monotonic() - self.last_heard < LIVE_S:
-                        # he's talking to me: stay for an answer, then the usual hang-up applies
+                        # someone is talking to me: stay for an answer, then the usual hang-up applies
                         d.deaf = False
                         d.last_words = time.monotonic() - max(0, self.dead_air - REPLY_WINDOW_S)
                     else:
                         await asyncio.sleep(0.5)    # the tail of the audio, still in the device's queue
                         await self.hang_up(d)
-            if first_audio is not None:
+            if first_audio is not None and feed is None:
                 turn = self.clock.said(asked=asked, rendered_first=rendered_first, first_audio=first_audio,
                                        done=time.monotonic(), pieces=len(pieces), chars=len(text),
                                        audio_s=sent * FRAME_MS / 1000, woke=woke, clip=wav is not None,
                                        answering=answering)
                 log.info("said %s piece(s), %.1fs: first sound %d ms after the words arrived%s", len(pieces), turn["audio_s"],
                          turn["to_first_sound_ms"],
-                         f", {turn['last_word_to_first_sound_ms']} ms after he stopped talking" if "answers" in turn else "")
+                         f", {turn['last_word_to_first_sound_ms']} ms after the talking stopped" if "answers" in turn else "")
             if failed is not None:
                 raise failed    # part of the line was said; the rest couldn't be rendered
             return sent * FRAME_MS / 1000
@@ -974,6 +1050,9 @@ class Link:
                 if self.talk_task is not None:
                     self.talk_task.cancel()
                     self.talk_task = None
+                if self.loop is not None:
+                    self.loop.drop_waiting()
+                    asyncio.create_task(self.loop.tell_off())
         return ws
 
     async def on_json(self, d: Device, m: dict):
@@ -1002,6 +1081,8 @@ class Link:
             raise web.HTTPUnauthorized(text="bad token")
 
     async def say_route(self, request):
+        if self.loop is not None:
+            return await self.loop.say_route(request)
         self.authorized(request)
         body = await request.json()
         text = (body.get("text") or "").strip()
@@ -1016,6 +1097,8 @@ class Link:
         whoever answers. With wait, an empty answer is held until something is heard or the wait runs
         out (30 s at most), so the words arrive the moment they're transcribed and nobody has to keep
         looking. after=0 answers at once with what's been heard since this server started, to begin from."""
+        if self.loop is not None:
+            return await self.loop.heard_route(request)
         self.authorized(request)
         try:
             after = float(request.query.get("after", "0") or 0)
@@ -1038,6 +1121,8 @@ class Link:
 
     async def voice_timing(self, request):
         """GET /api/voice-timing: how long each leg of the recent turns took (timing.py). No words."""
+        if self.loop is not None:
+            return await self.loop.voice_timing(request)
         self.authorized(request)
         return web.json_response({"turns": self.clock.recent(), "end_silence_ms": self.end_silence_ms,
                                   "end_silence_range": list(END_SILENCE_RANGE)})
@@ -1257,8 +1342,13 @@ class Link:
         self.touch_task = asyncio.create_task(self.watch_touch())
         self.silence_task = asyncio.create_task(self.watch_silence())
         self.night_task = asyncio.create_task(self.watch_night())
+        if self.loop is not None:
+            self.loop.start()
+            log.info("the conversation is kept by Lodestar; this server is the ears and mouth called %s", self.loop.mouth)
 
     async def on_stop(self, app):
+        if self.loop is not None:
+            await self.loop.stop()
         self.touch_task.cancel()
         self.silence_task.cancel()
         self.night_task.cancel()

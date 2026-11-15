@@ -17,6 +17,11 @@
 #include <mutex>
 #include <assets.h>
 #include <settings.h>
+#include <esp_random.h>
+#include <string>
+#include <string_view>
+#include <vector>
+#include <hal/sd_assets.h>
 
 static const char* _tag = "HAL_BRIDGE";
 
@@ -155,6 +160,43 @@ void app_play_sound(const std::string_view& sound)
     auto& app = Application::GetInstance();
     app.PlaySound(sound);
 }
+
+}  // namespace hal_bridge
+
+/*
+ * The robot's stock prompts ("upgrading the system") are clips built into the firmware. A face can
+ * bring its own: snd_<name>.ogg on the card plays in place of the stock one, and when the card has
+ * several (snd_<name>_1.ogg, snd_<name>_2.ogg, ...) one is picked at random each time. No card, or no
+ * such file, and the stock clip plays as it always did. So no voice is built into the firmware, and
+ * what the robot says travels with the face. Today the one name is "upgrade".
+ *
+ * Declared in Xiaozhi's application.cc, which is why it sits outside the namespace.
+ */
+std::string_view soma_card_prompt(const char* name)
+{
+    const std::string prefix = std::string("snd_") + name;
+    std::vector<std::string> mine;
+    for (const auto& file : sd_assets::names_with_prefix(prefix)) {
+        // snd_upgrade.ogg or snd_upgrade_<anything>.ogg, and not snd_upgraded.ogg
+        const std::string rest = file.substr(prefix.size());
+        if (rest == ".ogg" || (rest.size() > 5 && rest[0] == '_' && rest.compare(rest.size() - 4, 4, ".ogg") == 0)) {
+            mine.push_back(file);
+        }
+    }
+    if (mine.empty()) {
+        return {};
+    }
+    void* data  = nullptr;
+    size_t size = 0;
+    const std::string& pick = mine[esp_random() % mine.size()];
+    if (!sd_assets::get(pick, data, size) || data == nullptr || size == 0) {
+        return {};
+    }
+    ESP_LOGI("SomaPrompt", "%s: playing %s from the card (1 of %u)", name, pick.c_str(), (unsigned)mine.size());
+    return std::string_view(static_cast<const char*>(data), size);  // the card's assets stay in PSRAM for the session
+}
+
+namespace hal_bridge {
 
 bool app_is_speaking()
 {

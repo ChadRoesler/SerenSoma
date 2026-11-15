@@ -194,13 +194,16 @@ Nothing new on the robot: `POST /api/leds` already took one LED (`{"index": 3, "
 already reported what each was last told to show (`leds`, twelve `rrggbb` from LED 0). A value stops
 at 168.
 
-The firmware counts 12 LEDs: 0 to 5 on one rail, 6 to 11 on the other. LEDs 0, 1, 6 and 7 are the
-robot's own (the microphone, reply and camera lights); a face's colours fade LEDs 2 to 5 and 8 to 11.
+The firmware counts 12 LEDs: 0 to 5 along one rail from front to back, 6 to 11 back along the other
+from back to front. The front two of each rail are the robot's own: 0 and 11 are the microphone and
+reply light, 1 and 10 the camera's red light (`hal/rails.h`). A face's colours fade the other eight,
+LEDs 2 to 9. Until firmware of 13 Nov 2026 the robot's own were 0, 1, 6 and 7, which put them at the
+front on one side and the back on the other.
 The Lights tab lights one at a time, or walks all twelve, so the number can be matched to where each
 LED sits. The label written under each is kept with the touch chart (`leds` in `touch_map.json`, and
 in `GET /bench/map`), which is where anything animating the rails LED by LED should read it from.
 
-A pose with colours of its own takes LEDs 2 to 5 and 8 to 11 back when it's next shown.
+A pose with colours of its own takes LEDs 2 to 9 back when it's next shown.
 
 ## A shake
 

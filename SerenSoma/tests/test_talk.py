@@ -283,3 +283,41 @@ def test_tapping_the_robot_off_ends_back_and_forth_rather_than_being_undone(tmp_
         return (await (await client.get("/talk", headers=auth)).json())["on"], list(book)
     on, book = _with_speaker(tmp_path, go)
     assert on is False and book[-1] == ("release", voice.TALK_HOLDER)
+
+
+def test_a_long_opening_sentence_is_cut_at_its_first_clause_so_something_short_goes_first():
+    assert voice.split_sentences("Okay, here's one: octopuses have three hearts and blue blood, and two of them stop. Wild.") ==         ["Okay, here's one:", "octopuses have three hearts and blue blood, and two of them stop. Wild."]
+    assert voice.split_sentences("Ha, you're talking to a robot on your desk, so yes, you've got my full attention.") ==         ["Ha, you're talking to a robot on your desk,", "so yes, you've got my full attention."]
+    # short enough already, or nowhere to cut: left whole
+    assert voice.split_sentences("Good, we're on the same page.") == ["Good, we're on the same page."]
+    assert voice.split_sentences("This one has no clause break in it anywhere at all so it stays as it is.") ==         ["This one has no clause break in it anywhere at all so it stays as it is."]
+
+
+@pytest.mark.parametrize("said, stops", [
+    ("Alright, stop it.", True), ("Stop.", True), ("Okay, that's enough now.", True), ("Go to sleep", True),
+    ("Oh, stop it, you're killing me.", False), ("Don't stop now", False), ("Stop the octopus thing", False), ("", False),
+])
+def test_only_a_stop_said_on_its_own_is_an_order(said, stops):
+    assert voice.is_stop(said) is stops
+
+
+def test_a_stop_addressed_by_name_counts_only_for_the_names_the_person_gave():
+    juno = voice.spoken_names("Juno, June")
+    assert juno == {"juno", "june"}
+    assert voice.is_stop("Okay Juno, that's enough now.", juno) and voice.is_stop("Stop it, June.", juno)
+    assert not voice.is_stop("Okay Juno, that's enough now.")          # no name given: it isn't one of the phrases
+    assert not voice.is_stop("Okay Wren, stop.", juno)                 # nobody's name is built in
+    assert voice.spoken_names("") == frozenset()
+
+
+def test_stop_said_aloud_ends_back_and_forth_and_isnt_passed_on_to_be_answered(tmp_path):
+    async def go(client, auth, link, rt, spoken):
+        await client.post("/talk", headers=auth, json={"minutes": 30})
+        robot = await _robot(client, rt)
+        await link.hear(np.zeros(16000, dtype=np.int16), time.monotonic(), 900)
+        closed = await asyncio.wait_for(robot.receive(), 5)
+        talk = await (await client.get("/talk", headers=auth)).json()
+        heard = await (await client.get("/heard?after=0", headers=auth)).json()
+        return closed.type, talk["on"], heard["entries"]
+    closed, on, entries = _with_speech(tmp_path, go, heard_text="Alright, stop it.")
+    assert closed in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED) and on is False and entries == []

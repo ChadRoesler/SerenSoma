@@ -216,6 +216,11 @@ struct FaceManifest_t {
     uitk::Vector2i rightBrowPos{52, -46};
     std::map<std::string, std::string> browShapesLeft, browShapesRight;  // shape name -> asset
     bool browsAboveEyes = false;  // drawn after the eyes: no lid ever covers them
+    // face.json "layers": the face's own order for what's drawn over the base, bottom to top. The
+    // tokens are brows, eyes, mouth, hair, decorators, plus dec:<name> for one decorator given a
+    // place of its own and brow:left / brow:right for one brow given one. Empty: the order the
+    // firmware always drew (brows, eyes, mouth, hair, decorators; aboveEyes moves the brows).
+    std::vector<std::string> layers;
 
     /* -------------------------------- Expression ------------------------------- */
     std::map<std::string, DecoratorSpec_t> decorators;
@@ -249,6 +254,11 @@ struct FaceManifest_t {
 class EyeRig : public Feature {
 public:
     EyeRig(lv_obj_t* parent, const FaceManifest_t& manifest, bool isLeftEye);
+    /** @brief The one object the whole eye is inside (white, iris, lids): what a layer order moves. */
+    lv_obj_t* obj() const
+    {
+        return _socket ? _socket->get() : nullptr;
+    }
     ~EyeRig();
 
     void setPosition(const uitk::Vector2i& position) override;
@@ -324,6 +334,10 @@ private:
 class MouthRig : public Feature {
 public:
     MouthRig(lv_obj_t* parent, const FaceManifest_t& manifest);
+    lv_obj_t* obj() const
+    {
+        return _image ? _image->get() : nullptr;
+    }
     ~MouthRig();
 
     void setPosition(const uitk::Vector2i& position) override;
@@ -362,6 +376,10 @@ private:
 class SpriteBrow {
 public:
     SpriteBrow(lv_obj_t* parent, const FaceManifest_t& manifest, bool isLeftBrow);
+    lv_obj_t* obj() const
+    {
+        return _image ? _image->get() : nullptr;
+    }
     ~SpriteBrow();
 
     /** @param shape a drawn brow shape; "" or unknown keeps the current image */
@@ -399,6 +417,10 @@ private:
 class SpriteDecorator : public Decorator {
 public:
     SpriteDecorator(lv_obj_t* parent, const DecoratorSpec_t& spec, const uitk::Vector2i& anchorPoint);
+    lv_obj_t* obj() const
+    {
+        return _image ? _image->get() : nullptr;
+    }
     ~SpriteDecorator();
 
     void _update() override;
@@ -490,7 +512,8 @@ public:
 
     /** @brief Replace the current pose's twitch, until the next emotion. For trying one out. */
     void setTwitch(const PoseTwitch_t& twitch);
-    /** @brief Fade the mood LEDs (2-5 and 8-11) to a color. 0, 1, 6 and 7 stay for the mic, reply and camera lights. */
+    /** @brief Fade the mood LEDs (2 to 9) to a color. The front two of each rail, 0, 1, 10 and 11, stay for
+     *  the mic, reply and camera lights (hal/rails.h). */
     void showLights(uint8_t r, uint8_t g, uint8_t b, uint32_t pulseMs = 0);
     /** @brief Look, brows and mouth motion for the pose showing now, until the next emotion. For trying them out. */
     void tryRig(const uitk::Vector2i& lookLeft, const uitk::Vector2i& lookRight, const uitk::Vector2i& browLeft,
@@ -594,6 +617,14 @@ private:
 
     uitk::Vector2i anchorFor(const std::string& anchor) const;
     void applyDecorators(const std::vector<std::string>& names);
+
+    // The face's own layer order (FaceManifest_t::layers). Every child of the panel that has a
+    // place in it is in _layer_rank, lower drawn first; a child that isn't (the speech bubble) stays
+    // on top. Unused when the face gave no order.
+    std::map<lv_obj_t*, int> _layer_rank;
+    int layerRank(const std::string& token) const;
+    void restackLayers(lv_obj_t* leftEye, lv_obj_t* rightEye, lv_obj_t* mouth);
+    void placeDecorator(lv_obj_t* obj, const std::string& name);
     void applyBackdrop(const EmotionPose_t& pose);
     const lv_image_dsc_t* cachedImage(const std::string& name);
 };

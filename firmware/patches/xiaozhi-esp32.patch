@@ -1,5 +1,5 @@
 diff --git a/main/application.cc b/main/application.cc
-index 31de205..538ae52 100644
+index 31de205..1dbbba9 100644
 --- a/main/application.cc
 +++ b/main/application.cc
 @@ -1,4 +1,5 @@
@@ -8,7 +8,18 @@ index 31de205..538ae52 100644
  #include "assets.h"
  #include "assets/lang_config.h"
  #include "audio_codec.h"
-@@ -442,9 +443,20 @@ void Application::CheckAssetsVersion() {
+@@ -12,6 +13,10 @@
+ #include "text_glyph_payload.h"
+ #include "websocket_protocol.h"
+ 
++// Defined in the body's own code (main/hal/board/hal_bridge.cc): a clip from the SD card to play in
++// place of a stock prompt, or empty for none.
++std::string_view soma_card_prompt(const char* name);
++
+ #include <driver/gpio.h>
+ #include <esp_log.h>
+ #include <arpa/inet.h>
+@@ -442,9 +447,21 @@ void Application::CheckAssetsVersion() {
  void Application::CheckNewVersion() {
      const int MAX_RETRY = 10;
      int retry_count = 0;
@@ -23,13 +34,14 @@ index 31de205..538ae52 100644
 +    if (ota_->GetCheckVersionUrl().length() < 10) {
 +        ESP_LOGW(TAG, "No voice server set: put voice: in soma.yaml on the SD card");
 +        board.GetDisplay()->SetStatus("No voice server");
++        ota_->MarkCurrentVersionValid();  // it booted fine; rollback is for broken images, not this
 +        return;
 +    }
 +
      while (true) {
          auto display = board.GetDisplay();
          display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
-@@ -499,15 +511,18 @@ void Application::CheckNewVersion() {
+@@ -499,15 +516,18 @@ void Application::CheckNewVersion() {
  
          // No new version, mark the current version as valid
          ota_->MarkCurrentVersionValid();
@@ -52,7 +64,7 @@ index 31de205..538ae52 100644
          }
  
          // This will block the loop until the activation is done or timeout
-@@ -725,30 +740,6 @@ void Application::InitializeProtocol() {
+@@ -725,30 +745,6 @@ void Application::InitializeProtocol() {
      protocol_->Start();
  }
  
@@ -83,7 +95,21 @@ index 31de205..538ae52 100644
  void Application::Alert(const char* status, const char* message, const char* emotion,
                          const std::string_view& sound) {
      ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
-@@ -833,6 +824,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+@@ -757,7 +753,12 @@ void Application::Alert(const char* status, const char* message, const char* emo
+     display->SetEmotion(emotion);
+     display->SetChatMessage("system", message);
+     if (!sound.empty()) {
+-        audio_service_.PlaySound(sound);
++        // A face can bring its own words for the robot's stock prompts (hal_bridge::card_prompt).
++        std::string_view mine;
++        if (sound.data() == Lang::Sounds::OGG_UPGRADE.data()) {
++            mine = soma_card_prompt("upgrade");
++        }
++        audio_service_.PlaySound(mine.empty() ? sound : mine);
+     }
+ }
+ 
+@@ -833,6 +834,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
          if (!protocol_->OpenAudioChannel()) {
              // Return to idle so the device is not stuck in the connecting
              // state (not every failure path reports a network error)
@@ -91,7 +117,7 @@ index 31de205..538ae52 100644
              SetDeviceState(kDeviceStateIdle);
              return;
          }
-@@ -970,6 +962,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+@@ -970,6 +972,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
              // Return to idle so the device is not stuck in the connecting
              // state (not every failure path reports a network error), and
              // wake word detection is re-enabled by the idle state handler.
@@ -99,6 +125,17 @@ index 31de205..538ae52 100644
              SetDeviceState(kDeviceStateIdle);
              return;
          }
+@@ -1225,7 +1228,9 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
+ 
+     Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "download",
+           Lang::Sounds::OGG_UPGRADE);
+-    vTaskDelay(pdMS_TO_TICKS(3000));
++    // 4.5 s, not 3: the audio is stopped for the download right after this, and a face's own
++    // upgrade line (soma_card_prompt) can run a little longer than the stock one.
++    vTaskDelay(pdMS_TO_TICKS(4500));
+ 
+     SetDeviceState(kDeviceStateUpgrading);
+ 
 diff --git a/main/application.h b/main/application.h
 index f2b9a00..68f01d1 100644
 --- a/main/application.h
