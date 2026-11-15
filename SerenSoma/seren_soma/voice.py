@@ -501,7 +501,16 @@ class Link:
         await d.ws.close()
 
     async def send(self, d: Device, message: dict):
-        await d.ws.send_str(json.dumps({"session_id": d.session_id, **message}))
+        """A message to the robot. A channel that closed while it was on its way is not an error: the
+        robot hung up, or something here closed it (a stop, back and forth ending), and whoever was
+        telling it something has nothing left to tell. On 14 Nov 2026 a stop closing the channel from
+        one side while the words heard were being sent to its screen from the other raised out of hear()."""
+        if d.ws.closed:
+            return
+        try:
+            await d.ws.send_str(json.dumps({"session_id": d.session_id, **message}))
+        except ConnectionError:
+            pass
 
     async def wake_device(self, deaf: bool = True):
         """Open the channel from this end. It stays deaf, and hangs up after the line: I can get
@@ -695,7 +704,11 @@ class Link:
                         for packet in packets:
                             if not d.speaking:
                                 break
-                            await d.ws.send_bytes(packet)
+                            try:
+                                await d.ws.send_bytes(packet)
+                            except ConnectionError:      # the channel closed mid-line: the line is over
+                                d.speaking = False
+                                break
                             if first_audio is None:
                                 first_audio = time.monotonic()
                             sent += 1

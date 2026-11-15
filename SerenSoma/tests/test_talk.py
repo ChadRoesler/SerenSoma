@@ -332,3 +332,14 @@ def test_never_is_never_however_recently_the_box_started(tmp_path, monkeypatch):
     for just_booted in (0.5, 40.0, 100000.0):
         assert just_booted - used > voice.WARM_AFTER_S          # so the voice is warmed
         assert not just_booted - heard < voice.LIVE_S           # and nobody is taken to have just spoken
+
+
+def test_telling_a_robot_that_has_just_hung_up_is_not_an_error(tmp_path):
+    async def go(client, auth, link, rt, spoken):
+        robot = await _robot(client, rt)
+        d = link.device
+        await link.hang_up(d)                                   # a stop, from one side...
+        await link.send(d, {"type": "stt", "text": "too late"})   # ...while the other still had something to tell it
+        await robot.close()
+        return d.ws.closed
+    assert _with_speech(tmp_path, go) is True
