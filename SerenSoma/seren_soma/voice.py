@@ -26,6 +26,7 @@ import av
 import numpy as np
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, WSMsgType, web
 
+from .appendages import Appendages
 from .bench import Bench
 from .relay import LodestarLoop
 from .timing import VoiceClock
@@ -1407,6 +1408,7 @@ def make_app(link: "Link", viewer_html: str = "") -> web.Application:
     app.router.add_post("/talk", link.talk_post)
     app.router.add_get("/api/voice-timing", link.voice_timing)
     Bench(link, STATE).add_routes(app)
+    Appendages(link, STATE).add_routes(app)
     if viewer_html:
         async def viewer(request):
             return web.Response(text=viewer_html, content_type="text/html",

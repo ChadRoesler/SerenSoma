@@ -48,3 +48,19 @@ input[type=color] { width:44px; height:30px; padding:2px; background:var(--surfa
 .key { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:12px; color:var(--text-dim); margin:6px 0; }
 .key i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; }
 details > summary { cursor:pointer; color:var(--text-dim); margin:6px 0; }
+.subtabs { display:flex; flex-wrap:wrap; gap:4px; margin:0 0 14px; }
+.subtab { background:var(--surface-2); color:var(--text-dim); border:1px solid var(--border); border-radius:999px;
+  padding:4px 14px; font-size:13px; cursor:pointer; }
+.subtab.active { color:var(--accent); border-color:var(--accent); }
+.subview { display:none; } .subview.active { display:block; }
+.apgrid { display:grid; grid-template-columns:minmax(200px, 240px) 1fr; gap:14px; align-items:start; }
+@media (max-width: 720px) { .apgrid { grid-template-columns:1fr; } }
+.apside { display:flex; flex-direction:column; gap:14px; min-width:0; }
+.apside .card, .aplist { margin:0; }
+.apitem { display:flex; gap:8px; align-items:flex-start; padding:8px; border:1px solid var(--border); border-radius:8px;
+  margin:6px 0; cursor:pointer; background:var(--bg-2); font-size:13px; }
+.apitem.sel { border-color:var(--accent); }
+.apitem.bad { border-left:3px solid var(--danger); }
+.apitem input { margin-top:2px; }
+input.appin { width:4.5em; }
+#apCard { max-height:none; }

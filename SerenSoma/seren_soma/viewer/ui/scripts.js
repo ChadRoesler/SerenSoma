@@ -165,7 +165,11 @@ document.addEventListener("DOMContentLoaded", () => {
 // routes through; the page never holds the robot's token. Loops run only while their tab is showing.
 const getJson = async path => (await call(path, {})).json();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const showing = id => $(id).classList.contains("active");
+// A diagnostics panel is showing only while it is the chosen one *and* Diagnostics is the open tab.
+const showing = id => {
+  const el = $(id), tab = el.closest(".view");
+  return el.classList.contains("active") && (!tab || tab === el || tab.classList.contains("active"));
+};
 const hue = c => `hsl(${(c * 47) % 360} 75% 60%)`;     // one colour per channel, the same everywhere
 const ZONE = ["back", "middle", "front"];
 const facts = rows => rows.map(([k, v]) => `<span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b>`).join("");
@@ -751,3 +755,93 @@ document.addEventListener("DOMContentLoaded", () => {
   $("tkOn").onclick = () => setTalk({ minutes: Number($("tkMinutes").value) });
   $("tkOff").onclick = () => setTalk({ on: false });
 });
+
+// ── Diagnostics: the stock body's four benches under one tab ─────────
+// Which one was open last is the reader's choice, and is remembered.
+const SUBS = ["voice", "servos", "lights", "touch"];
+function showSub(id) {
+  document.querySelectorAll(".subtabs .subtab").forEach(b => b.classList.toggle("active", b.dataset.sub === id));
+  document.querySelectorAll(".subview").forEach(v => v.classList.toggle("active", v.id === id));
+  try { localStorage.setItem("soma_diag_sub", id); } catch (e) { /* fine */ }
+  if (id === "voice") voiceOpen(); else benchOpen();
+}
+function diagOpen() {
+  let id = "voice";
+  try { const kept = localStorage.getItem("soma_diag_sub"); if (SUBS.includes(kept)) id = kept; } catch (e) { /* fine */ }
+  showSub(id);
+}
+
+// ── Appendages: the plan, checked, and what the robot says it carries ─
+// firmware/docs/appendages.md is the design. Until the firmware has its registry, the robot reports
+// nothing and the Diagnostics pane says so; the plan and its pin check are this box's.
+const AP = { data: null, sel: null };
+async function apOpen() {
+  try { AP.data = await getJson("/appendages"); say("apMsg", ""); }
+  catch (e) { say("apMsg", why(e), true); return; }
+  if (!AP.data.plan.some(a => a.name === AP.sel)) AP.sel = AP.data.plan.length ? AP.data.plan[0].name : null;
+  apPaint();
+}
+async function apSave(plan) {
+  try {
+    AP.data = await (await call("/appendages", { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ appendages: plan }) })).json();
+    say("apMsg", "Kept.");
+  } catch (e) { say("apMsg", e.message, true); }
+  apPaint();
+}
+function apPaint() {
+  const d = AP.data; if (!d) return;
+  const chk = d.check;
+  $("apList").innerHTML = d.plan.map(a => {
+    const ok = chk.appendages[a.name].ok;
+    return `<div class="apitem${a.name === AP.sel ? " sel" : ""}${ok ? "" : " bad"}" data-name="${escapeHtml(a.name)}">
+      <input type="checkbox" ${a.on ? "checked" : ""} data-name="${escapeHtml(a.name)}" title="In the robot's list">
+      <span>${escapeHtml(a.name)}<br><span class="muted tiny">${escapeHtml(a.kind)}${ok ? "" : " · pin problem"}</span></span></div>`;
+  }).join("") || `<p class="muted tiny">No appendages in the plan.</p>`;
+  $("apList").querySelectorAll(".apitem").forEach(el => el.onclick = e => {
+    if (e.target.tagName === "INPUT") return;
+    AP.sel = el.dataset.name; apPaint();
+  });
+  $("apList").querySelectorAll("input[type=checkbox]").forEach(cb => cb.onchange = () => {
+    apSave(d.plan.map(a => a.name === cb.dataset.name ? { ...a, on: cb.checked } : a));
+  });
+  const b = chk.budget;
+  $("apBudget").innerHTML = facts([["Free pins used", `${b.used} of ${b.free}`],
+    ["Left", b.left.length ? b.left.map(p => `G${p}`).join(" ") : "none"]]);
+
+  const a = d.plan.find(x => x.name === AP.sel);
+  if (!a) { $("apTitle").textContent = "About it"; $("apFacts").innerHTML = ""; $("apPins").innerHTML = ""; return; }
+  const kind = d.kinds[a.kind], mine = chk.appendages[a.name];
+  $("apTitle").textContent = a.name;
+  $("apFacts").innerHTML = facts([
+    ["Kind", kind.title],
+    ["Gets on by", kind.how === "described" ? "a line on the card (no rebuild)" : "a firmware build with it compiled in"],
+    ["Power", kind.power],
+    ["In the robot's list", a.on ? "yes" : "no"],
+    ...Object.entries(a.opts).map(([k, v]) => [k, v]),
+  ]);
+  $("apPins").innerHTML = Object.entries(kind.pins).map(([role, what]) => {
+    const pin = a.pins[role];
+    const where = pin === undefined ? "" : d.free_pins[String(pin)] || "";
+    return `<tr><td>${escapeHtml(role)}</td>
+      <td class="num"><input type="number" min="0" max="48" value="${pin ?? ""}" data-role="${escapeHtml(role)}" class="appin"></td>
+      <td>${escapeHtml(where)}</td><td class="muted">${escapeHtml(what)}</td></tr>`;
+  }).join("");
+  $("apPins").querySelectorAll("input.appin").forEach(inp => inp.onchange = () => {
+    const pins = { ...a.pins };
+    if (inp.value === "") delete pins[inp.dataset.role]; else pins[inp.dataset.role] = Number(inp.value);
+    apSave(d.plan.map(x => x.name === a.name ? { ...x, pins } : x));
+  });
+  $("apProblems").textContent = mine.problems.join(" · ");
+  $("apProblems").className = "msg tiny" + (mine.problems.length ? " bad" : " ok");
+  if (!mine.problems.length) $("apProblems").textContent = a.on ? "Its pins are clear." : "Not in the robot's list, so it claims no pins.";
+  $("apCard").textContent = mine.card;
+
+  const r = d.robot, there = r.reported && (r.appendages || []).find(x => x.name === a.name);
+  $("apRobot").innerHTML = facts([["The robot", r.reported ? (there ? (there.ok ? "carries it" : `refused it: ${there.error || "no reason given"}`) : "doesn't list it") : r.why]]);
+  $("apTest").textContent = "Self-test: " + kind.test;
+  $("apActions").innerHTML = [...kind.actions, "test"].map(x =>
+    `<button class="btn" disabled title="${there ? "" : "Needs firmware with the appendage registry"}">${escapeHtml(x)}</button>`).join("");
+  $("apState").hidden = !there;
+  if (there) $("apState").textContent = JSON.stringify(there.state || there, null, 1);
+}

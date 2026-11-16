@@ -3,8 +3,9 @@
     <h3>The body</h3>
     <div id="facts" class="facts muted">Looking…</div>
     <p class="muted tiny">This page builds the body: setting the robot up, its firmware, and its log for whoever's
-      helping. Touch and Servos are the hardware as it is: which pad answers where, and how the neck is
-      running. Its faces, and what a touch means to it, are SerenPsycheion's.</p>
+      helping. Diagnostics is the stock body as it is: which pad answers where, how the neck is running,
+      the light rails and the voice's timing. Appendages are what's plugged in on top of it. Its faces,
+      and what a touch means to it, are SerenPsycheion's.</p>
   </div>
 </section>
 
@@ -73,7 +74,15 @@
   </div>
 </section>
 
-<section class="view" id="touch">
+<section class="view" id="diagnostics">
+<nav class="subtabs">
+  <button class="subtab" data-sub="voice" onclick="showSub('voice')">Voice</button>
+  <button class="subtab" data-sub="servos" onclick="showSub('servos')">Servos</button>
+  <button class="subtab" data-sub="lights" onclick="showSub('lights')">Lights</button>
+  <button class="subtab" data-sub="touch" onclick="showSub('touch')">Touch</button>
+</nav>
+
+<div class="subview" id="touch">
   <div class="card">
     <h3>The touch chip, live</h3>
     <div class="row">
@@ -159,9 +168,9 @@
         scritch, a resting finger or a whole hand, then asks the robot for the face that goes with it.</li>
     </ol>
   </div>
-</section>
+</div>
 
-<section class="view" id="servos">
+<div class="subview" id="servos">
   <div class="card">
     <h3>The neck, live</h3>
     <div class="row">
@@ -229,9 +238,9 @@
     <div class="facts" id="swFacts"></div>
     <div class="msg tiny" id="swMsg"></div>
   </div>
-</section>
+</div>
 
-<section class="view" id="lights">
+<div class="subview" id="lights">
   <div class="card">
     <h3>The lights, one at a time</h3>
     <div class="row">
@@ -250,9 +259,9 @@
       the rails back.</p>
     <div class="msg tiny" id="ldMsg"></div>
   </div>
-</section>
+</div>
 
-<section class="view" id="voice">
+<div class="subview" id="voice">
   <div class="card">
     <h3>Back and forth</h3>
     <div class="row">
@@ -303,5 +312,39 @@
         sentence into a voice, and opening the channel. A line is rendered a sentence at a time, so the wait is for
         the first sentence, not the whole line.</p>
     </details>
+  </div>
+</div>
+</section>
+
+<section class="view" id="appendages">
+  <div class="apgrid">
+    <div class="card aplist">
+      <h3>Appendages</h3>
+      <div id="apList"></div>
+      <div class="facts tiny" id="apBudget"></div>
+      <p class="muted tiny">Ticked means it's in the robot's list. A pin plan with problems is still kept, so you can
+        see what's wrong with it.</p>
+      <div class="msg tiny" id="apMsg"></div>
+    </div>
+    <div class="apside">
+      <div class="card">
+        <h3 id="apTitle">About it</h3>
+        <div class="facts" id="apFacts"></div>
+        <table class="staged"><thead><tr><th>Pin</th><th class="num">GPIO</th><th>Where</th><th>For</th></tr></thead>
+          <tbody id="apPins"></tbody></table>
+        <div class="msg tiny" id="apProblems"></div>
+        <h4>On the card</h4>
+        <pre class="log" id="apCard"></pre>
+        <p class="muted tiny">The line <code>soma.yaml</code> will carry under <code>appendages:</code> once the
+          firmware reads one. firmware/docs/appendages.md is the design.</p>
+      </div>
+      <div class="card">
+        <h3>Diagnostics</h3>
+        <div class="facts" id="apRobot"></div>
+        <p class="muted tiny" id="apTest"></p>
+        <div class="row" id="apActions"></div>
+        <pre class="log" id="apState" hidden></pre>
+      </div>
+    </div>
   </div>
 </section>
