@@ -42,6 +42,7 @@ constexpr size_t kMaxToken    = 95;
 constexpr size_t kMaxUrl      = 128;
 constexpr size_t kMaxTsKey    = 128;
 constexpr size_t kMaxTsName   = 63;
+constexpr size_t kMaxAppendages = 1500;  // the whole list, as saved
 
 #ifdef CONFIG_STACKCHAN_CONTROL_TOKEN
 constexpr const char* kBuildToken = CONFIG_STACKCHAN_CONTROL_TOKEN;
@@ -74,6 +75,7 @@ struct Value_t {
 
 struct Card_t {
     Value_t ssid, password, voice, token, ts_key, ts_name;
+    Value_t appendages;  // every line under appendages:, as "name: kind key=value ..." lines
 };
 
 void wipe(std::string& s)
@@ -144,7 +146,7 @@ Value_t* slot(Card_t& card, const std::string& section, const std::string& key)
 
 bool is_section(const std::string& key)
 {
-    return key == "wifi" || key == "tailnet";
+    return key == "wifi" || key == "tailnet" || key == "appendages";
 }
 
 /** @brief Read the file into card. Returns false if it could not be opened. */
@@ -186,12 +188,23 @@ bool parse(FILE* f, Card_t& card)
         if (indent == 0) {
             if (is_section(key) && value.empty()) {
                 section = key;
+                if (key == "appendages") {
+                    // The section replaces the saved list whole; with nothing under it, it empties it.
+                    card.appendages.present = true;
+                    card.appendages.text.clear();
+                }
                 continue;
             }
             section.clear();
         } else if (section.empty()) {
-            ESP_LOGW(kTag, "line %d is indented but not under wifi: or tailnet:, ignoring it", number);
+            ESP_LOGW(kTag, "line %d is indented but not under a section, ignoring it", number);
             wipe(value);
+            continue;
+        }
+
+        if (section == "appendages") {
+            // Any name is a key here: what the line means is the registry's to say (hal_appendages.cpp).
+            card.appendages.text += key + ": " + value + "\n";
             continue;
         }
 
@@ -305,6 +318,17 @@ void apply(Card_t& card, std::vector<std::string>* changed = nullptr)
         ESP_LOGI(kTag, "tailnet name is now %s", card.ts_name.text.empty() ? kBuildTsName : card.ts_name.text.c_str());
         note("tailnet.name");
     }
+    if (card.appendages.present && fits(card.appendages, kMaxAppendages, "appendages")) {
+        Settings settings(kNs, true);
+        if (card.appendages.text.empty()) {
+            settings.EraseKey("appendages");
+            ESP_LOGI(kTag, "appendage list emptied");
+        } else {
+            settings.SetString("appendages", card.appendages.text);
+            ESP_LOGI(kTag, "appendage list saved, it takes effect at the next boot");
+        }
+        note("appendages");
+    }
     if (!kHasTailnet && (card.ts_key.present || card.ts_name.present)) {
         ESP_LOGW(kTag, "tailnet settings saved, but this build has no tailnet; they wait for one that does");
     }
@@ -382,6 +406,22 @@ void soma_config::apply_json(const cJSON* body, std::vector<std::string>& change
         take(tailnet, "key", card.ts_key);
         take(tailnet, "name", card.ts_name);
     }
+    // {"appendages": {"light": "flashlight en=9"}} replaces the list whole; {} empties it.
+    const cJSON* list = cJSON_GetObjectItemCaseSensitive(body, "appendages");
+    if (cJSON_IsObject(list)) {
+        card.appendages.present = true;
+        const cJSON* one        = nullptr;
+        cJSON_ArrayForEach(one, list)
+        {
+            if (one->string != nullptr && cJSON_IsString(one) && one->valuestring != nullptr) {
+                card.appendages.text += lower(trim(one->string)) + ": " + trim(one->valuestring) + "\n";
+            } else {
+                ESP_LOGW(kTag, "/api/config: an appendage is \"name\": \"kind key=value ...\", ignoring one that is not");
+            }
+        }
+    } else if (list != nullptr) {
+        ESP_LOGW(kTag, "/api/config: appendages is not an object, ignoring it");
+    }
     apply(card, &changed);
     wipe_card(card);
 }
@@ -420,4 +460,9 @@ std::string soma_config::tailnet_name()
 {
     std::string n = saved("ts_name");
     return n.empty() ? std::string(kBuildTsName) : n;
+}
+
+std::string soma_config::appendages()
+{
+    return saved("appendages");
 }

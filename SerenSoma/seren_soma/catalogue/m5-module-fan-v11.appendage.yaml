@@ -1,0 +1,39 @@
+# M5 Module Fan v1.1 (M013-V11): the base file for a fan.
+#
+# A draft of the appendage file format in firmware/docs/appendages.md ("Appendage files").
+# Nothing reads this file yet; the firmware's i2c kind and Soma's import are still to build.
+# Registers from M5's own library (m5stack/M5Module-Fan, src/m5_module_fan.hpp), checked
+# 18 Nov 2026; on the robot, 19 Nov: 20% gave 3,720 RPM, and it ships at 24 kHz.
+
+appendage: 1
+name: fan
+title: M5 Module Fan v1.1 (M013-V11)
+by: Chad and Wren
+kind: i2c
+provides: [airflow]
+
+i2c:
+  addr: 0x18                    # on the internal bus, through the M-Bus: no pins
+  registers:
+    enable: {reg: 0x00, write: [0, 1]}
+    pwm_hz: {reg: 0x10, read: u8}       # 0 is 1 kHz, 1 is 12, 2 is 24, 3 is 48. Read only: 1 and 12 kHz whine
+    speed:  {reg: 0x20, write: 0..100}
+    rpm:    {reg: 0x30, read: u16le}
+  never: [0xF0, 0xFF]           # 0xF0 saves to its flash; 0xFF moves its address for good
+
+actions:
+  # on is level at a default speed, so it spins after an off and the night ceiling holds it
+  on:    {as: level, level: 30}
+  off:   {write: {speed: 0}}
+  level: {write: {enable: 1, speed: $level}}   # level is the speed in percent, 1 to 100
+
+readings: [rpm]
+
+limits:
+  # Every on ends by itself, a fan's too. Whatever wants it running (a watcher on the LLM module's
+  # temperature, say) renews it; if that watcher dies, the fan stops instead of running unnoticed.
+  on_ms: 300000
+  on_ms_max: 600000
+
+night:
+  ceiling: 20                   # about 48.6 dB by M5's sheet; it sits next to the microphones

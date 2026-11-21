@@ -68,8 +68,13 @@
       <input id="fwVersion" maxlength="32" placeholder="its version, e.g. 0.2.0-mine">
       <button class="btn" id="fwUpload">Stage it</button>
     </div>
-    <table class="staged"><thead><tr><th>Staged</th><th>From</th><th>Size</th><th></th></tr></thead>
+    <table class="staged"><thead><tr><th>Staged</th><th>From</th><th>Size</th><th class="num">Staged at</th><th></th></tr></thead>
       <tbody id="fwRows"></tbody></table>
+    <details id="fwOlder" hidden>
+      <summary>Previous versions (<span id="fwOlderCount">0</span>)</summary>
+      <table class="staged"><tbody id="fwOldRows"></tbody></table>
+    </details>
+    <p class="muted tiny">Nothing leaves this list by itself: an image stays until you remove it.</p>
     <div class="msg tiny" id="fwMsg"></div>
   </div>
 </section>
@@ -80,6 +85,7 @@
   <button class="subtab" data-sub="servos" onclick="showSub('servos')">Servos</button>
   <button class="subtab" data-sub="lights" onclick="showSub('lights')">Lights</button>
   <button class="subtab" data-sub="touch" onclick="showSub('touch')">Touch</button>
+  <button class="subtab" data-sub="power" onclick="showSub('power')">Power</button>
 </nav>
 
 <div class="subview" id="touch">
@@ -261,6 +267,37 @@
   </div>
 </div>
 
+<div class="subview" id="power">
+  <div class="card">
+    <h3>Power, live</h3>
+    <div class="row">
+      <button class="btn primary" id="pwWatch">Start watching</button>
+      <button class="btn" id="pwCsv">Download the readings</button>
+      <span class="muted tiny" id="pwRate"></span>
+    </div>
+    <div class="facts" id="pwFacts"></div>
+    <h4>Battery, volts</h4>
+    <canvas class="strip trend" id="pwBatt" width="900" height="130"></canvas>
+    <h4>USB in, volts</h4>
+    <canvas class="strip trend" id="pwUsb" width="900" height="130"></canvas>
+    <div id="pwAmpsWrap" hidden>
+      <h4>Battery current, milliamps (the body's monitor)</h4>
+      <canvas class="strip trend" id="pwAmps" width="900" height="130"></canvas>
+    </div>
+    <div class="muted tiny" id="pwHover">Point at a line to read it.</div>
+    <h4>What changed while you watched</h4>
+    <div class="tiny events" id="pwEvents"></div>
+    <p class="muted tiny">The power chip is asked every two seconds while this is watching, and only then. It measures
+      voltages and not current, so a load shows as a dip and a lead that loses contact shows as a jump or a gap: wiggle
+      the cable and watch the lines. The current strip appears when the body has its own battery monitor and the
+      firmware reads it; that one is real milliamps, so a light or a servo shows as a step. The percentage is the chip's own gauge and can wander; the battery's voltage
+      cannot be confused about which way it is going. "Held back" is the chip saying the input sags or is at its
+      limit, which is what a weak port or a thin cable looks like. The readings are kept on this page only, up to
+      thirty minutes of them, and are gone when it reloads.</p>
+    <div class="msg tiny" id="pwMsg"></div>
+  </div>
+</div>
+
 <div class="subview" id="voice">
   <div class="card">
     <h3>Back and forth</h3>
@@ -322,8 +359,10 @@
       <h3>Appendages</h3>
       <div id="apList"></div>
       <div class="facts tiny" id="apBudget"></div>
-      <p class="muted tiny">Ticked means it's in the robot's list. A pin plan with problems is still kept, so you can
-        see what's wrong with it.</p>
+      <p class="muted tiny">Ticked means it belongs in the robot's list. A pin plan with problems is still kept, so
+        you can see what's wrong with it, but it can't be sent.</p>
+      <p class="muted tiny" id="apSync"></p>
+      <div class="row"><button class="btn" id="apApply">Send to the robot</button></div>
       <div class="msg tiny" id="apMsg"></div>
     </div>
     <div class="apside">
@@ -335,15 +374,30 @@
         <div class="msg tiny" id="apProblems"></div>
         <h4>On the card</h4>
         <pre class="log" id="apCard"></pre>
-        <p class="muted tiny">The line <code>soma.yaml</code> will carry under <code>appendages:</code> once the
-          firmware reads one. firmware/docs/appendages.md is the design.</p>
+        <p class="muted tiny">Its line under <code>appendages:</code> in <code>soma.yaml</code>, and what Send to the
+          robot saves. firmware/docs/appendages.md is the design.</p>
       </div>
       <div class="card">
         <h3>Diagnostics</h3>
         <div class="facts" id="apRobot"></div>
         <p class="muted tiny" id="apTest"></p>
         <div class="row" id="apActions"></div>
+        <div class="msg tiny" id="apActMsg"></div>
         <pre class="log" id="apState" hidden></pre>
+      </div>
+      <div class="card">
+        <h3>Fan (bench)</h3>
+        <p class="muted tiny">M5 Module Fan v1.1 at 0x18, driven straight through the robot's I2C bench route until
+          the appendage files are built. It can reach the fan's on/off, speed and readings, nothing else. It stays at
+          whatever you set until you set it again: no timer yet, no night ceiling.</p>
+        <div class="row">
+          <label class="tiny">Speed <input type="range" id="fanSpeed" min="0" max="100" step="5" value="20"></label>
+          <span class="tiny" id="fanSpeedText">20%</span>
+          <button class="btn" id="fanSet">Set</button><button class="btn" id="fanStop">Stop</button>
+          <button class="btn" id="fanRead">Read</button>
+        </div>
+        <div class="facts" id="fanFacts"></div>
+        <div class="msg tiny" id="fanMsg"></div>
       </div>
     </div>
   </div>

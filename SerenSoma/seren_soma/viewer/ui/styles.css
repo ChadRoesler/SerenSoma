@@ -64,3 +64,5 @@ details > summary { cursor:pointer; color:var(--text-dim); margin:6px 0; }
 .apitem input { margin-top:2px; }
 input.appin { width:4.5em; }
 #apCard { max-height:none; }
+canvas.trend { cursor:crosshair; margin-bottom:4px; }
+.events span { color:var(--text-dim); font-family:var(--mono); margin-right:8px; }

@@ -51,7 +51,13 @@ def use_state(folder: Path) -> None:
     CLIPS, SETTINGS, SERVICE_LOG = STATE / "clips", STATE / "settings.json", STATE / "seren-soma.log"
 # What the console changes. Night is off until it's turned on; the rest are what tonight settled on.
 DEFAULT_SETTINGS = {
-    "night": {"enabled": False, "start": "22:30", "end": "07:00", "dimmer": 15, "volume": 30, "brightness": 20},
+    # light: the ceiling on an appendage light's level (a flashlight). 28 is the top of what was
+    # comfortable to have pointed at a person in a dark room (19 Nov 2026); night allows that and stops.
+    # appendages: a ceiling per appendage, by name, {"light": 28, "fan": 20}. Only the ones someone has set:
+    # an appendage left out holds the default its own file declares, on the robot, never "uncapped"
+    # (docs/appendages.md, "Night ceilings"). `light` above is the first slice's and goes with it.
+    "night": {"enabled": False, "start": "22:30", "end": "07:00", "dimmer": 15, "volume": 30, "brightness": 20,
+              "light": 28, "appendages": {}},
     # When the person's working: a fact about the house. Nothing here acts on it; SerenPsycheion reads it
     # and keeps a face's build-ups out of those hours.
     "work_hours": {"days": [0, 1, 2, 3, 4], "start": 8, "end": 17},
@@ -96,6 +102,22 @@ def merge_settings(current, change):
             if k not in DEFAULT_SETTINGS[section]:
                 raise ValueError(f"no setting called {section}.{k}")
             want = DEFAULT_SETTINGS[section][k]
+            if section == "night" and k == "appendages":
+                # merged by name: a number sets that one's ceiling, null hands it back to its file's default
+                if not isinstance(v, dict):
+                    raise ValueError("night.appendages is {name: ceiling}")
+                caps = dict(out[section].get(k) or {})
+                for name, cap in v.items():
+                    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_-]{1,24}", name):
+                        raise ValueError(f"night.appendages: {name!r} isn't an appendage name")
+                    if cap is None:
+                        caps.pop(name, None)
+                    elif not isinstance(cap, int) or isinstance(cap, bool) or not 1 <= cap <= 100:
+                        raise ValueError(f"night.appendages.{name} is a level, 1 to 100")
+                    else:
+                        caps[name] = cap
+                out[section][k] = caps
+                continue
             if isinstance(want, bool):
                 if not isinstance(v, bool):
                     raise ValueError(f"{section}.{k} is true or false")
@@ -977,6 +999,21 @@ class Link:
         self.firmware_armed = None
         return web.json_response({"ok": True, "armed": None})
 
+    async def firmware_remove(self, request):
+        """DELETE /firmware/staged/<version>: take a staged image off this box. Images don't fall off
+        by themselves, so this is the only way one leaves. The armed one stays until it is disarmed."""
+        from . import firmware as fw
+        self.authorized(request)
+        version = request.match_info["version"]
+        if self.firmware_armed and self.firmware_armed["version"] == version.removeprefix("fw-v"):
+            raise web.HTTPConflict(text=f"{version} is armed for the robot's next check-in; disarm it first")
+        try:
+            entry = fw.unstage(self._fw_state(), version)
+        except fw.FirmwareError as e:
+            raise web.HTTPNotFound(text=str(e))
+        log.info("removed staged firmware %s", entry.version)
+        return web.json_response({"ok": True, "removed": entry.version})
+
     async def firmware_image(self, request):
         """GET /firmware/image/<file>: the image itself, to the robot only (like the check-in)."""
         from . import firmware as fw
@@ -1164,13 +1201,17 @@ class Link:
         return web.json_response({"ok": True, "seconds": seconds})
 
     async def watch_night(self):
-        """Night caps for the robot's lights, speaker and screen, every minute while it's night, and off
+        """Night caps for the robot's lights, speaker, screen and appendage lights, every minute while it's night, and off
         when it isn't. Every minute rather than once, so a reboot at night comes back dim."""
         headers = self.robot_headers()
         while True:
             n = self.settings["night"]
             night = n["enabled"] and in_window(time.localtime(), n["start"], n["end"])
-            body = {"night": {"dimmer": n["dimmer"], "volume": n["volume"], "brightness": n["brightness"]} if night else None}
+            # light: firmware from before the appendage registry ignores a key it doesn't know
+            cap = {"dimmer": n["dimmer"], "volume": n["volume"], "brightness": n["brightness"], "light": n["light"]}
+            if n.get("appendages"):
+                cap["appendages"] = n["appendages"]   # by name; ignored by firmware that doesn't read the map yet
+            body = {"night": cap if night else None}
             try:
                 async with self.http.post(f"http://{self.args.device}:8080/api/settings", headers=headers, json=body,
                                           timeout=ClientTimeout(total=6)) as r:
@@ -1398,6 +1439,7 @@ def make_app(link: "Link", viewer_html: str = "") -> web.Application:
     app.router.add_put("/firmware/upload", link.firmware_upload)
     app.router.add_post("/firmware/install", link.firmware_install)
     app.router.add_post("/firmware/disarm", link.firmware_disarm)
+    app.router.add_delete("/firmware/staged/{version}", link.firmware_remove)
     app.router.add_get("/firmware/image/{file}", link.firmware_image)
     app.router.add_get("/health", link.health)
     app.router.add_get("/", link.root)

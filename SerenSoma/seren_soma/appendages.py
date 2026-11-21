@@ -1,11 +1,12 @@
 """Appendages: what's plugged into the body on top of the stock StackChan, and the plan for it.
 
-firmware/docs/appendages.md is the design. Until the firmware has its registry this module holds the
-plan: which appendages the robot should carry, on which pins, checked against the pins the base
-already uses. It also passes the robot's own GET /api/appendages through once firmware answers it.
-Until then the page says plainly that the robot doesn't report any.
+firmware/docs/appendages.md is the design. This module holds the plan: which appendages the robot
+should carry, on which pins, checked against the pins the base already uses. It passes the robot's
+own GET /api/appendages through, sends the plan to the robot when asked (POST /appendages/apply),
+and passes one appendage's actions on to it (POST /appendages/<name>). Against firmware from before
+the registry, the page says plainly that the robot doesn't report any.
 
-Kept: <state>/appendages.json, the plan. Nothing here talks to the robot except that one GET.
+Kept: <state>/appendages.json, the plan.
 """
 from __future__ import annotations
 
@@ -19,49 +20,53 @@ from aiohttp import ClientError, ClientTimeout, web
 # GPIOs the base firmware already uses (firmware/docs/appendages.md, "What the firmware already uses").
 # An appendage can never claim these.
 BASE_PINS: dict[int, str] = {
-    0: "I2S MCLK / boot button", 3: "LCD CS", 4: "SD card CS", 6: "servo bus TX", 7: "servo bus RX",
+    0: "I2S MCLK / boot button", 3: "LCD CS", 4: "SD card CS", 5: "the body's infrared LED",
+    6: "servo bus TX", 7: "servo bus RX", 10: "the body's infrared receiver",
     11: "internal I2C SCL", 12: "internal I2C SDA", 13: "I2S out", 14: "I2S in",
     15: "camera", 16: "camera", 19: "USB", 20: "USB", 33: "I2S WS", 34: "I2S BCLK",
     35: "LCD D/C + SD MISO", 36: "LCD/SD SCK", 37: "LCD/SD MOSI", 38: "camera", 39: "camera",
     40: "camera", 41: "camera", 42: "camera", 43: "console TX", 44: "console RX", 45: "camera",
     46: "camera", 47: "camera", 48: "camera",
 }
-# What's left, and where to reach it. The M-Bus side is from memory and not yet checked on the board.
-FREE_PINS: dict[int, str] = {1: "Port A", 2: "Port A", 5: "M-Bus", 8: "Port B", 9: "Port B",
-                             10: "M-Bus", 17: "Port C", 18: "Port C"}
+# What's left, and where to reach it: the same six the firmware's registry allows (hal_appendages.cpp).
+# G5 and G10 came off this list on 18 Nov 2026, when the body's schematic showed its infrared pair on them.
+FREE_PINS: dict[int, str] = {1: "Port A", 2: "Port A", 8: "Port B", 9: "Port B", 17: "Port C", 18: "Port C"}
 
-# The kinds the firmware will know. "described": wired by a line of config, built from primitives the
-# firmware carries. "compiled": a driver with its own protocol, built in from the Firmware tab.
+# The kinds. "described": wired by a line of config, built from primitives the firmware carries.
+# "compiled": a driver with its own protocol, built in from the Firmware tab. "built": the firmware
+# has it today; the rest are the plan, and the robot refuses a line of a kind it doesn't know.
 KINDS: dict[str, dict] = {
     "flashlight": {
-        "title": "Flashlight (M5 Unit FlashLight, AW3641E)", "how": "described",
-        "pins": {"en": "pulse train / on-off", "flash": "PWM dimming and mode (only with the white-wire mod)"},
-        "required": ["en"], "shareable": ["flash"],
-        "power": "torch ~214 mA, flash ~584 mA for at most 220 ms (5 V)",
-        "actions": ["on", "off", "level", "flash", "fade", "sweep"],
-        "test": "Torch for a second, then the flash levels at 8 s spacing, then a fade if modded. Check by eye.",
+        "title": "Flashlight (M5 Unit FlashLight, AW3641E), stock, switch on torch", "how": "described", "built": True,
+        "pins": {"en": "on, off and dimming: the yellow wire"},
+        "required": ["en"], "shareable": [],
+        "power": "torch ~214 mA at level 100 (5 V), in proportion below it",
+        "actions": ["on", "off", "level", "chop"],
+        "test": "none yet. Switch it on at a level and look. A level is a share of torch's light: 1 is 0.6%, "
+                "1 to 32 (3%) is comfortable in a dark room, 43 (5%) is already too bright there, 100 is plain "
+                "torch. Every on ends by itself.",
     },
     "fan": {
-        "title": "Fan", "how": "described",
+        "title": "Fan", "how": "described", "built": False,
         "pins": {"pwm": "speed, through a transistor"}, "required": ["pwm"], "shareable": [],
         "power": "depends on the fan; never from the pin directly",
         "actions": ["speed", "follow"],
         "test": "Ramps 0 to 100% and back; reports duty (and RPM if it has a tach).",
     },
     "dual_button": {
-        "title": "Dual Button", "how": "described",
+        "title": "Dual Button", "how": "described", "built": False,
         "pins": {"a": "button A", "b": "button B"}, "required": ["a", "b"], "shareable": [],
         "power": "negligible", "actions": ["bind"],
         "test": "Live: every press, release and hold, timestamped, until you stop it.",
     },
     "switch": {
-        "title": "Switch", "how": "described",
+        "title": "Switch", "how": "described", "built": False,
         "pins": {"in": "switch"}, "required": ["in"], "shareable": [],
         "power": "negligible", "actions": ["bind"],
         "test": "Live: each flip, timestamped.",
     },
     "ears": {
-        "title": "LLM Module as ears (AX630C: wake word, VAD, streaming speech-to-text)", "how": "compiled",
+        "title": "LLM Module as ears (AX630C: wake word, VAD, streaming speech-to-text)", "how": "compiled", "built": False,
         "pins": {"rx": "UART from the module", "tx": "UART to the module"}, "required": ["rx", "tx"], "shareable": [],
         "power": "~1.5 W, runs warm",
         "actions": ["listen", "stop", "hwinfo"],
@@ -69,15 +74,14 @@ KINDS: dict[str, dict] = {
     },
 }
 
-# The plan as of 16 Nov 2026: the parts on order, with the shared-FLASH dimming line and the pins the
-# design doc sketches. Placeholders until the pin audit is checked on the board.
+# The plan a fresh install starts from: what is really plugged in. 19 Nov 2026: one stock flashlight
+# on Port B, its enable on G9 (found on the bench the day before). The placeholders this list held
+# until then (two lights sharing a dimming line on G5, ears, fan, buttons) are gone with it.
 DEFAULT_PLAN: list[dict] = [
-    {"name": "light_left", "kind": "flashlight", "on": True, "pins": {"en": 8, "flash": 5}, "opts": {"side": "left"}},
-    {"name": "light_right", "kind": "flashlight", "on": True, "pins": {"en": 9, "flash": 5}, "opts": {"side": "right"}},
-    {"name": "ears", "kind": "ears", "on": False, "pins": {"rx": 18, "tx": 17}, "opts": {}},
-    {"name": "fan", "kind": "fan", "on": False, "pins": {"pwm": 10}, "opts": {"follows": "ears.temp"}},
-    {"name": "buttons", "kind": "dual_button", "on": False, "pins": {"a": 1, "b": 2}, "opts": {"on_a": "interrupt"}},
+    {"name": "light", "kind": "flashlight", "on": True, "pins": {"en": 9}, "opts": {}},
 ]
+# POST /appendages/<name> is an appendage's actions, so no appendage can carry a route's own name.
+RESERVED_NAMES = {"apply"}
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
 OPT_VALUE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
@@ -96,6 +100,8 @@ def clean_one(a) -> dict:
     name, kind = a.get("name"), a.get("kind")
     if not isinstance(name, str) or not NAME.match(name):
         raise PlanError("a name is lowercase letters, digits and _, starting with a letter, at most 24")
+    if name in RESERVED_NAMES:
+        raise PlanError(f"{name!r} is a route's name here; call it something else")
     if kind not in KINDS:
         raise PlanError(f"{name}: kind must be one of {', '.join(KINDS)}")
     spec = KINDS[kind]
@@ -136,10 +142,29 @@ def clean_plan(body) -> list[dict]:
     return out
 
 
+def card_value(a: dict) -> str:
+    """What follows the appendage's name on its line: the kind, then its wiring and options."""
+    return " ".join([a["kind"]] + [f"{k}={v}" for k, v in a["pins"].items()] + [f"{k}={v}" for k, v in a["opts"].items()])
+
+
 def card_line(a: dict) -> str:
-    """The appendage as one soma.yaml line, the way the firmware will read it."""
-    parts = [a["kind"]] + [f"{k}={v}" for k, v in a["pins"].items()] + [f"{k}={v}" for k, v in a["opts"].items()]
-    return f"  {a['name']}: {' '.join(parts)}"
+    """The appendage as one soma.yaml line, the way the firmware reads it."""
+    return f"  {a['name']}: {card_value(a)}"
+
+
+def robot_list(plan: list[dict]) -> dict:
+    """The ticked appendages as the robot's /api/config takes them: {"name": "kind key=value ..."}.
+    Raises PlanError with every reason the plan can't go as it stands."""
+    chk, wrong = check(plan), []
+    for a in plan:
+        if not a["on"]:
+            continue
+        if not KINDS[a["kind"]].get("built"):
+            wrong.append(f"{a['name']}: the firmware has no {a['kind']} yet, so untick it")
+        wrong += [f"{a['name']}: {p}" for p in chk["appendages"][a["name"]]["problems"]]
+    if wrong:
+        raise PlanError("; ".join(wrong))
+    return {a["name"]: card_value(a) for a in plan if a["on"]}
 
 
 def check(plan: list[dict]) -> dict:
@@ -228,6 +253,59 @@ class Appendages:
         tmp.replace(self.file)
         return web.json_response(self.answer(plan, await self.robot()))
 
+    async def _to_robot(self, path: str, body: dict):
+        """POST to the robot and hand back (status, its JSON). The robot's own refusals come back as
+        they are: its reasons are written for a person."""
+        url = f"{self.link.args.robot_url.rstrip('/')}{path}"
+        try:
+            async with self.link.http.post(url, headers=dict(self.link.robot_headers()), json=body,
+                                           timeout=ClientTimeout(total=8)) as r:
+                try:
+                    return r.status, await r.json(content_type=None)
+                except ValueError:
+                    return r.status, None       # not JSON: firmware with no such route answers in plain text
+        except (ClientError, asyncio.TimeoutError) as e:
+            raise web.HTTPBadGateway(text=f"the robot didn't answer: {e or type(e).__name__}")
+
+    async def apply(self, request):
+        """POST /appendages/apply: save the ticked appendages on the robot as its whole list, and restart
+        it, since the registry reads the list at boot. Refused, with the reasons, while a ticked one has a
+        pin problem or is of a kind the firmware doesn't have: the robot would only refuse it at boot."""
+        self.link.authorized(request)
+        plan = self.load()
+        try:
+            lines = robot_list(plan)
+        except PlanError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        status, answer = await self._to_robot("/api/config", {"appendages": lines, "reboot": True})
+        if status == 404:
+            raise web.HTTPBadGateway(text="this robot's firmware has no /api/config: update it first")
+        if status != 200 or "appendages" not in (answer or {}).get("changed", []):
+            raise web.HTTPBadGateway(text="the robot didn't take the list: its firmware is from before the "
+                                          "appendage registry, or it answered " + str(status))
+        return web.json_response({"ok": True, "sent": lines, "rebooting": bool(answer.get("rebooting"))})
+
+    async def act(self, request):
+        """POST /appendages/<name> {"action": "on", "level": 24, "ms": 5000}: one of that appendage's own
+        actions, passed to the robot as it is. The robot's answer and status come back unchanged."""
+        self.link.authorized(request)
+        name = request.match_info["name"]
+        if not NAME.match(name):
+            raise web.HTTPBadRequest(text="no appendage has a name like that")
+        try:
+            body = await request.json()
+        except ValueError:
+            raise web.HTTPBadRequest(text="expected JSON")
+        if not isinstance(body, dict) or not isinstance(body.get("action"), str):
+            raise web.HTTPBadRequest(text='expected {"action": "..."}')
+        status, answer = await self._to_robot(f"/api/appendages/{name}", body)
+        if answer is None:
+            raise web.HTTPBadGateway(text="this firmware has no appendages yet: it needs a build with the registry"
+                                     if status == 404 else f"the robot answered {status} with something that isn't JSON")
+        return web.json_response(answer, status=status)
+
     def add_routes(self, app: web.Application) -> None:
         app.router.add_get("/appendages", self.get)
         app.router.add_put("/appendages", self.put)
+        app.router.add_post("/appendages/apply", self.apply)
+        app.router.add_post("/appendages/{name}", self.act)

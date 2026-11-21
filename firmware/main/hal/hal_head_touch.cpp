@@ -246,9 +246,26 @@ static void _head_touch_update_task(void* param)
 
     vTaskDelay(pdMS_TO_TICKS(200));
 
+    // A core with no body has no touch chip. A read that fails is no touch, never whatever the
+    // variable was left holding: on 18 Nov 2026 a bare core counted 82 presses in 108 seconds and
+    // cycled through its faces. And a chip that keeps not answering is asked less often, so its
+    // absence does not fill the shared bus with failed reads every 50 ms.
+    int misses = 0;
+    constexpr int kAbsentAfter = 20;  // a second of nothing
+
     while (1) {
         // Read data
-        si12t_read_touch_result(si12t, &touch_result);
+        if (si12t_read_touch_result(si12t, &touch_result) != ESP_OK) {
+            touch_result = 0;
+            if (misses < kAbsentAfter && ++misses == kAbsentAfter) {
+                mclog::tagWarn(_tag, "the touch chip is not answering: asking every 2 s until it does");
+            }
+        } else {
+            if (misses >= kAbsentAfter) {
+                mclog::tagInfo(_tag, "the touch chip is answering again");
+            }
+            misses = 0;
+        }
         si12t_parse_touch_result_to(touch_result, data.intensity);
         data.timestamp = xTaskGetTickCount();
 
@@ -264,7 +281,7 @@ static void _head_touch_update_task(void* param)
             GetHAL().onHeadPetGesture.emit(gesture);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(misses >= kAbsentAfter ? 2000 : 50));
     }
 }
 

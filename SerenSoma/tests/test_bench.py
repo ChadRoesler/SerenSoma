@@ -142,3 +142,42 @@ def test_the_chart_is_kept_and_read_back_with_its_summary(tmp_path):
     assert bad == 400 and "x must be" in why and put == 200 and unasked == 401
     assert again["note"] == "top pad" and again["channels"]["1"]["points"] == 1
     assert json.loads((state / "touch_map.json").read_text(encoding="utf-8"))["points"][0]["label"] == "back middle"
+
+
+def test_the_fan_route_names_only_the_fans_registers(tmp_path):
+    regs = {0x00: [1], 0x20: [0], 0x30: [0x88, 0x0E], 0x10: [2]}
+
+    async def i2c(request):
+        body = json.loads(await request.text())
+        seen_i2c.append(body)
+        if "write" in body:
+            regs[body["reg"]] = [body["write"]]
+            return web.json_response({"ok": True, "wrote": body["write"]})
+        return web.json_response({"ok": True, "bytes": regs[body["reg"]][: body.get("len", 1)] + [0]})
+    seen_i2c = []
+
+    async def go(client, auth, seen, state):
+        got = await (await client.get("/bench/fan", headers=auth)).json()
+        bad = await client.post("/bench/fan", headers=auth, json={"speed": 101})
+        set_ = await (await client.post("/bench/fan", headers=auth, json={"speed": 40})).json()
+        stop = await (await client.post("/bench/fan", headers=auth, json={"speed": 0})).json()
+        unasked = await client.get("/bench/fan")
+        return got, bad.status, set_, stop, unasked.status
+
+    async def run():
+        robot = web.Application()
+        robot.router.add_post("/api/bench-i2c", i2c)
+        async with TestServer(robot) as robot_server:
+            y = tmp_path / "soma.yaml"
+            y.write_text(f"state_dir: {str(tmp_path / 'state').replace(chr(92), '/')}\nadvertise: 10.0.0.2\n"
+                         f"robot:\n  url: {str(robot_server.make_url('')).rstrip('/')}\n  token: robot-secret\n"
+                         "lodestar:\n  url: http://lodestar:6361\n  token: t\n", encoding="utf-8")
+            link = voice.Link(load_config(str(y)).runtime())
+            async with TestClient(TestServer(voice.make_app(link))) as client:
+                return await go(client, {"Authorization": f"Bearer {link.token}"}, None, None)
+    got, bad, set_, stop, unasked = asyncio.run(run())
+    assert got == {"ok": True, "enabled": True, "speed": 0, "rpm": 3720, "pwmHz": 24000}
+    assert bad == 400 and unasked == 401
+    assert set_["speed"] == 40 and stop["speed"] == 0
+    assert {b["addr"] for b in seen_i2c} == {0x18}                        # never any other chip
+    assert {b["reg"] for b in seen_i2c if "write" in b} <= {0x00, 0x20}   # only on/off and speed are written

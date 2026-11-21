@@ -66,6 +66,7 @@
 #include "face_push.h"
 #include "touch_log.h"
 #include "soma_config.h"
+#include "hal_appendages.h"
 #include "sd_assets.h"
 #include "hal.h"
 #include <mooncake_log.h>
@@ -83,12 +84,16 @@ static const std::string_view _tag = "HAL-Control";
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+#include <driver/gpio.h>
+#include <driver/ledc.h>
+#include <driver/uart.h>
 #include <cJSON.h>
 #include <board.h>
 #include <display/display.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -197,6 +202,7 @@ struct NightCap_t {
     int dimmer     = 100;
     int volume     = 100;
     int brightness = 100;
+    int light      = 100;  // appendage lights (a flashlight's level); 100 when the sender doesn't say
 };
 NightCap_t _night;
 int _applied_volume     = -1;
@@ -239,6 +245,7 @@ void add_settings(cJSON* root)
         cJSON_AddNumberToObject(n, "dimmer", _night.dimmer);
         cJSON_AddNumberToObject(n, "volume", _night.volume);
         cJSON_AddNumberToObject(n, "brightness", _night.brightness);
+        cJSON_AddNumberToObject(n, "light", _night.light);
     } else {
         cJSON_AddNullToObject(s, "night");
     }
@@ -273,9 +280,11 @@ esp_err_t handle_settings(httpd_req_t* req)
             _night.dimmer     = uitk::clamp(json_int(night, "dimmer", 100), 0, 100);
             _night.volume     = uitk::clamp(json_int(night, "volume", 100), 0, 100);
             _night.brightness = uitk::clamp(json_int(night, "brightness", 100), 0, 100);
+            _night.light      = uitk::clamp(json_int(night, "light", 100), 0, 100);
         } else if (cJSON_IsNull(night) || cJSON_IsFalse(night)) {
             _night.on = false;
         }
+        appendages::set_light_cap(_night.on ? _night.light : 100);
         cJSON_Delete(body);
     }
     apply_settings();
@@ -334,6 +343,38 @@ esp_err_t handle_status(httpd_req_t* req)
     add_settings(root);
     cJSON_AddNumberToObject(root, "batteryLevel", GetHAL().getBatteryLevel());
     cJSON_AddBoolToObject(root, "charging", GetHAL().isBatteryCharging());
+    {
+        // What the power chip measures, at this moment. Absent if the chip did not answer.
+        hal_bridge::PowerDetail detail;
+        if (hal_bridge::board_read_power_detail(detail)) {
+            static const char* const kDirections[] = {"standby", "charging", "discharging", "unknown"};
+            static const char* const kPhases[]     = {"trickle",          "pre-charge", "constant current",
+                                                      "constant voltage", "done",       "not charging",
+                                                      "unknown",          "unknown"};
+            cJSON* power = cJSON_AddObjectToObject(root, "power");
+            cJSON_AddNumberToObject(power, "batteryMv", detail.battery_mv);
+            cJSON_AddNumberToObject(power, "usbMv", detail.usb_mv);
+            cJSON_AddNumberToObject(power, "systemMv", detail.system_mv);
+            cJSON_AddNumberToObject(power, "chipTempC", detail.chip_temp_dc / 10.0);
+            cJSON_AddBoolToObject(power, "usbGood", detail.usb_good);
+            cJSON_AddBoolToObject(power, "batteryPresent", detail.battery_present);
+            cJSON_AddBoolToObject(power, "inputLimited", detail.input_limited);
+            cJSON_AddStringToObject(power, "direction", kDirections[detail.direction & 3]);
+            cJSON_AddStringToObject(power, "phase", kPhases[detail.phase & 7]);
+            char raw[2 * sizeof(detail.raw) + 1];
+            for (size_t i = 0; i < sizeof(detail.raw); i++) {
+                std::snprintf(raw + 2 * i, 3, "%02x", detail.raw[i]);
+            }
+            cJSON_AddStringToObject(power, "raw", raw);
+            if (detail.monitor_ok) {
+                // The sign is the chip's own, and on this body negative is into the battery: settled on
+                // the robot on 19 Nov 2026 (-680 mA with the battery climbing). Do not check it against
+                // `direction`, which said "charging" that night while the battery was losing 170 mA.
+                cJSON_AddNumberToObject(power, "monitorMv", detail.monitor_mv);
+                cJSON_AddNumberToObject(power, "monitorMa", detail.monitor_qma / 4.0);
+            }
+        }
+    }
     cJSON_AddNumberToObject(root, "freeInternalHeap",
                             static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
     cJSON_AddNumberToObject(root, "freePsram",
@@ -1363,6 +1404,343 @@ esp_err_t handle_reboot(httpd_req_t* req)
 }
 
 /**
+ * The appendages (docs/appendages.md, hal_appendages.cpp). GET /api/appendages lists them;
+ * POST /api/appendages/<name> runs one of that kind's actions: {"action": "...", ...}.
+ */
+esp_err_t handle_appendages(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddItemToObject(root, "appendages", appendages::list());
+    return send_json(req, root);
+}
+
+esp_err_t handle_appendage_act(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    constexpr const char* kPrefix = "/api/appendages/";
+    std::string name              = req->uri + std::strlen(kPrefix);
+    name                          = name.substr(0, name.find('?'));
+    cJSON* body                   = read_body(req);
+    if (!cJSON_IsObject(body)) {
+        cJSON_Delete(body);
+        return send_error(req, "400 Bad Request", "expected {\"action\": \"...\"}");
+    }
+    cJSON* root = cJSON_CreateObject();
+    std::string error;
+    const char* status = appendages::act(name, body, root, error);
+    cJSON_Delete(body);
+    if (status != nullptr) {
+        cJSON_Delete(root);
+        return send_error(req, status, error.c_str());
+    }
+    cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
+/**
+ * BENCH ONLY, 18 Nov 2026: who is on the internal I2C bus, for a stack being put together
+ * (the core's own chips, the body's, the fan module's). With no body it scans and lists every
+ * address that answers. {"addr", "reg", "len": 1..16} reads registers. The only thing it will
+ * write is the fan module's on/off and speed (0x18, registers 0x00 and 0x20, 0..100): the
+ * power chip is on this bus too, and a stray write there can switch the robot's rails off.
+ */
+esp_err_t handle_bench_i2c(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body     = req->content_len > 0 ? read_body(req) : nullptr;
+    const int addr  = json_int(body, "addr", -1);
+    const int reg   = json_int(body, "reg", -1);
+    const int len   = uitk::clamp(json_int(body, "len", 1), 1, 16);
+    const int write = json_int(body, "write", -1);
+    cJSON_Delete(body);
+
+    i2c_master_bus_handle_t bus = hal_bridge::board_get_i2c_bus();
+    if (bus == nullptr) {
+        return send_error(req, "500 Internal Server Error", "no I2C bus");
+    }
+
+    if (addr < 0) {
+        cJSON* root  = cJSON_CreateObject();
+        cJSON* found = cJSON_AddArrayToObject(root, "found");
+        for (int a = 0x08; a <= 0x77; a++) {
+            if (i2c_master_probe(bus, a, 20) == ESP_OK) {
+                char hex[8];
+                std::snprintf(hex, sizeof(hex), "0x%02x", a);
+                cJSON_AddItemToArray(found, cJSON_CreateString(hex));
+            }
+        }
+        cJSON_AddBoolToObject(root, "ok", true);
+        return send_json(req, root);
+    }
+
+    if (addr < 0x08 || addr > 0x77 || reg < 0 || reg > 0xFF) {
+        return send_error(req, "400 Bad Request", "addr 0x08..0x77 and reg 0..255, as numbers");
+    }
+    if (write >= 0 && !(addr == 0x18 && (reg == 0x00 || reg == 0x20) && write <= 100)) {
+        return send_error(req, "403 Forbidden", "this writes only the fan: addr 24, reg 0 (on/off) or 32 (speed), 0..100");
+    }
+
+    i2c_device_config_t cfg     = {};
+    cfg.dev_addr_length         = I2C_ADDR_BIT_LEN_7;
+    cfg.device_address          = static_cast<uint16_t>(addr);
+    cfg.scl_speed_hz            = 100000;
+    i2c_master_dev_handle_t dev = nullptr;
+    if (i2c_master_bus_add_device(bus, &cfg, &dev) != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "could not open that address");
+    }
+    uint8_t data[16]  = {0};
+    const uint8_t r   = static_cast<uint8_t>(reg);
+    esp_err_t err     = ESP_OK;
+    if (write >= 0) {
+        const uint8_t out[2] = {r, static_cast<uint8_t>(write)};
+        err                  = i2c_master_transmit(dev, out, sizeof(out), 100);
+    } else {
+        err = i2c_master_transmit_receive(dev, &r, 1, data, len, 100);
+    }
+    i2c_master_bus_rm_device(dev);
+    if (err != ESP_OK) {
+        return send_error(req, "502 Bad Gateway", "nothing at that address answered");
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    if (write >= 0) {
+        cJSON_AddNumberToObject(root, "wrote", write);
+    } else {
+        char hex[2 * sizeof(data) + 1] = {0};
+        cJSON* bytes                   = cJSON_AddArrayToObject(root, "bytes");
+        for (int i = 0; i < len; i++) {
+            std::snprintf(hex + 2 * i, 3, "%02x", data[i]);
+            cJSON_AddItemToArray(bytes, cJSON_CreateNumber(data[i]));
+        }
+        cJSON_AddStringToObject(root, "hex", hex);
+    }
+    return send_json(req, root);
+}
+
+/**
+ * The CoreS3's ambient light sensor (LTR-553ALS, 0x23 on the internal bus). Nothing in this
+ * firmware read it before 19 Nov 2026; it sits in standby from power-on. Added to measure how
+ * bright the flashlight really is at each level: the sensor adds up light over 100 ms, so a
+ * chopped light reads as its average, which is what an eye sees.
+ *
+ * GET /api/ambient[?gain=1|2|4|8|48|96] wakes it on first use (or changes its gain) and answers
+ * with the two raw counts: ch0 is visible plus infrared, ch1 infrared alone, 0 to 65535 each.
+ * Counts, not lux: for comparing one light against itself the count is the honest number, and
+ * the lux formula depends on the window over the sensor. saturated means lower the gain or
+ * back the light off.
+ */
+esp_err_t handle_ambient(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    i2c_master_bus_handle_t bus = hal_bridge::board_get_i2c_bus();
+    if (bus == nullptr) {
+        return send_error(req, "500 Internal Server Error", "no I2C bus");
+    }
+
+    static int active_gain = 0;  // 0: still in standby
+    int gain               = active_gain > 0 ? active_gain : 1;
+    char query[32]         = {0};
+    char value[8]          = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "gain", value, sizeof(value)) == ESP_OK) {
+        gain = std::atoi(value);
+    }
+    int code = -1;
+    switch (gain) {
+        case 1:  code = 0; break;
+        case 2:  code = 1; break;
+        case 4:  code = 2; break;
+        case 8:  code = 3; break;
+        case 48: code = 6; break;
+        case 96: code = 7; break;
+        default: break;
+    }
+    if (code < 0) {
+        return send_error(req, "400 Bad Request", "gain is 1, 2, 4, 8, 48 or 96");
+    }
+
+    i2c_device_config_t cfg     = {};
+    cfg.dev_addr_length         = I2C_ADDR_BIT_LEN_7;
+    cfg.device_address          = 0x23;
+    cfg.scl_speed_hz            = 100000;
+    i2c_master_dev_handle_t dev = nullptr;
+    if (i2c_master_bus_add_device(bus, &cfg, &dev) != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "could not open the sensor's address");
+    }
+    esp_err_t err = ESP_OK;
+    if (gain != active_gain) {
+        const uint8_t rate[2] = {0x85, 0x01};  // add up for 100 ms, a new reading every 100 ms
+        const uint8_t on[2]   = {0x80, static_cast<uint8_t>((code << 2) | 0x01)};
+        err                   = i2c_master_transmit(dev, rate, sizeof(rate), 100);
+        if (err == ESP_OK) {
+            err = i2c_master_transmit(dev, on, sizeof(on), 100);
+        }
+        if (err == ESP_OK) {
+            active_gain = gain;
+            vTaskDelay(pdMS_TO_TICKS(250));  // its wake-up, then two whole readings, so the first answer is real
+        }
+    }
+    // CH1 then CH0, low byte first, then the status byte: the chip holds a reading still while
+    // it is read in this order.
+    uint8_t data[5]   = {0};
+    const uint8_t reg = 0x88;
+    if (err == ESP_OK) {
+        err = i2c_master_transmit_receive(dev, &reg, 1, data, sizeof(data), 100);
+    }
+    i2c_master_bus_rm_device(dev);
+    if (err != ESP_OK) {
+        active_gain = 0;
+        return send_error(req, "502 Bad Gateway", "the light sensor did not answer");
+    }
+
+    const int ch1 = data[0] | (data[1] << 8);
+    const int ch0 = data[2] | (data[3] << 8);
+    cJSON* root   = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "ch0", ch0);
+    cJSON_AddNumberToObject(root, "ch1", ch1);
+    cJSON_AddNumberToObject(root, "gain", gain);
+    cJSON_AddBoolToObject(root, "valid", (data[4] & 0x80) == 0);
+    cJSON_AddBoolToObject(root, "saturated", ch0 >= 65535 || ch1 >= 65535);
+    cJSON_AddNumberToObject(root, "status", data[4]);
+    return send_json(req, root);
+}
+
+/**
+ * BENCH ONLY, 18 Nov 2026: one line to the LLM module and whatever comes back, to prove the
+ * serial link before the ears get a real driver (appendages.md, step 7). The module's own
+ * silkscreen puts its TX on G18 and its RX on G17 for a CoreS3, so this side receives on 18
+ * and sends on 17, 115200 8N1, a line of JSON each way.
+ * {"line": "...", "ms": 200..5000}; with no line it sends the module's ping.
+ */
+esp_err_t handle_bench_llm(httpd_req_t* req)
+{
+    if (!token_ok(req)) {
+        return send_error(req, "401 Unauthorized", "bad or missing token");
+    }
+    cJSON* body = req->content_len > 0 ? read_body(req) : nullptr;
+    std::string line = R"({"request_id":"bench","work_id":"sys","action":"ping","object":"None","data":"None"})";
+    cJSON* asked     = cJSON_GetObjectItem(body, "line");
+    if (cJSON_IsString(asked) && asked->valuestring[0] != '\0') {
+        line = asked->valuestring;
+    }
+    const int ms = uitk::clamp(json_int(body, "ms", 1500), 200, 5000);
+    cJSON_Delete(body);
+
+    // The module's sys unit runs shell commands as root (sys.bashexec) and writes files
+    // (sys.push). Forwarded blind, that made the robot's token a root shell on the module
+    // (found 19 Nov 2026). So a line is one JSON object, alone, and the sys unit gets only the
+    // actions that read; the rest need a bench build made with SOMA_LLM_BENCH_ROOT.
+    {
+        const char* why = nullptr;
+        if (line.find_first_of("\r\n") != std::string::npos) {
+            why = "one line: a line break would let a second command ride along";
+        }
+        cJSON* cmd = why ? nullptr : cJSON_ParseWithOpts(line.c_str(), nullptr, true);
+        if (!why && !cJSON_IsObject(cmd)) {
+            why = "a line is one JSON object and nothing after it";
+        }
+        if (!why) {
+            const cJSON* work   = cJSON_GetObjectItem(cmd, "work_id");
+            const cJSON* action = cJSON_GetObjectItem(cmd, "action");
+            if (!cJSON_IsString(work) || !cJSON_IsString(action)) {
+                why = "a line needs a work_id and an action";
+            } else if (std::string(work->valuestring) == "sys") {
+                static const char* kReads[] = {"ping", "hwinfo", "lsmode", "lstask", "version"};
+                bool allowed = false;
+                for (const char* a : kReads) {
+                    allowed = allowed || std::string(action->valuestring) == a;
+                }
+#ifndef SOMA_LLM_BENCH_ROOT
+                if (!allowed) {
+                    why = "the sys unit takes only ping, hwinfo, lsmode, lstask and version from here";
+                }
+#endif
+            }
+        }
+        cJSON_Delete(cmd);
+        if (why) {
+            return send_error(req, "403 Forbidden", why);
+        }
+    }
+
+    // Opened for this one call and closed after it: left open, the driver holds about 5.5 KB of
+    // internal RAM, which is more than the camera has to spare (measured 19 Nov 2026).
+    {
+        uart_config_t cfg = {};
+        cfg.baud_rate     = 115200;
+        cfg.data_bits     = UART_DATA_8_BITS;
+        cfg.parity        = UART_PARITY_DISABLE;
+        cfg.stop_bits     = UART_STOP_BITS_1;
+        cfg.flow_ctrl     = UART_HW_FLOWCTRL_DISABLE;
+        cfg.source_clk    = UART_SCLK_DEFAULT;
+        if (uart_driver_install(UART_NUM_2, 4096, 0, 0, nullptr, 0) != ESP_OK || uart_param_config(UART_NUM_2, &cfg) != ESP_OK ||
+            uart_set_pin(UART_NUM_2, GPIO_NUM_17, GPIO_NUM_18, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
+            uart_driver_delete(UART_NUM_2);
+            return send_error(req, "500 Internal Server Error", "the serial port to the module would not open");
+        }
+    }
+
+    // What was already waiting says as much as the answer: a module that is booting talks unasked.
+    std::string waiting;
+    std::string answer;
+    char chunk[256];
+    int got = 0;
+    while (waiting.size() < 2048 && (got = uart_read_bytes(UART_NUM_2, chunk, sizeof(chunk), pdMS_TO_TICKS(20))) > 0) {
+        waiting.append(chunk, got);
+    }
+    line += "\n";
+    uart_write_bytes(UART_NUM_2, line.data(), line.size());
+    const int64_t until = esp_timer_get_time() + static_cast<int64_t>(ms) * 1000;
+    while (esp_timer_get_time() < until && answer.size() < 4096) {
+        got = uart_read_bytes(UART_NUM_2, chunk, sizeof(chunk), pdMS_TO_TICKS(50));
+        if (got > 0) {
+            answer.append(chunk, got);
+        } else if (!answer.empty() && answer.back() == '\n') {
+            break;  // a whole line, and then quiet
+        }
+    }
+    uart_driver_delete(UART_NUM_2);
+
+    // Bytes that are not text would break the JSON this goes out in; a wrong baud rate looks like that.
+    auto printable = [](std::string& text) {
+        int odd = 0;
+        for (char& c : text) {
+            const unsigned char u = static_cast<unsigned char>(c);
+            if ((u < 0x20 && c != '\n' && c != '\r' && c != '\t') || u >= 0x7F) {
+                c = '?';
+                odd++;
+            }
+        }
+        return odd;
+    };
+    const int odd_waiting = printable(waiting);
+    const int odd_answer  = printable(answer);
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "waitedMs", ms);
+    cJSON_AddNumberToObject(root, "bytes", static_cast<double>(answer.size()));
+    cJSON_AddNumberToObject(root, "notText", odd_answer);
+    cJSON_AddStringToObject(root, "received", answer.c_str());
+    cJSON_AddNumberToObject(root, "waitingBytes", static_cast<double>(waiting.size()));
+    cJSON_AddNumberToObject(root, "waitingNotText", odd_waiting);
+    cJSON_AddStringToObject(root, "waiting", waiting.c_str());
+    return send_json(req, root);
+}
+
+/**
  * soma.yaml over the network: what seren-soma uses to set up a robot that is
  * already on Wi-Fi. Same keys, same rules (see soma_config.h). Answers with the
  * names of what was saved, never the values. Everything here is read at boot,
@@ -1456,7 +1834,9 @@ void start_httpd()
     config.ctrl_port        = CONFIG_STACKCHAN_CONTROL_PORT + 1;
     config.max_open_sockets = 4;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 30;  // 26 routes; past the cap a route silently fails to register
+    config.max_uri_handlers = 32;  // 31 routes; past the cap a route silently fails to register
+    // For /api/appendages/<name>. A route with no * in it still matches only itself.
+    config.uri_match_fn = httpd_uri_match_wildcard;
 #ifdef CONFIG_STACKCHAN_CAMERA
     config.stack_size = 8192;  // the JPEG encoder runs on this task
 #else
@@ -1526,6 +1906,11 @@ void start_httpd()
         {"/api/servo", HTTP_GET, handle_servo, nullptr},
         {"/api/servo", HTTP_POST, handle_servo_set, nullptr},
         {"/api/screen-touch", HTTP_GET, handle_screen_touch, nullptr},
+        {"/api/appendages", HTTP_GET, handle_appendages, nullptr},
+        {"/api/ambient", HTTP_GET, handle_ambient, nullptr},
+        {"/api/appendages/*", HTTP_POST, handle_appendage_act, nullptr},
+        {"/api/bench-llm", HTTP_POST, handle_bench_llm, nullptr},
+        {"/api/bench-i2c", HTTP_POST, handle_bench_i2c, nullptr},
     };
     for (const auto& route : routes) {
         httpd_register_uri_handler(_server, &route);
@@ -1547,6 +1932,9 @@ void Hal::startControlServer()
 
     // the saved light level, from the first frame
     setRgbDimmer(hal_bridge::soma_setting("dimmer", 100));
+
+    // every appendage pin low, before the network can ask for anything
+    appendages::start();
 
     onHeadPetGesture.connect([this](HeadPetGesture gesture) {
         if (gesture == HeadPetGesture::SwipeForward || gesture == HeadPetGesture::SwipeBackward) {

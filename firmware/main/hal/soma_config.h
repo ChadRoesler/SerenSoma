@@ -60,4 +60,11 @@ const char* voice_source();
 std::string tailnet_key();
 std::string tailnet_name();
 
+/**
+ * @brief The saved appendage list, one "name: kind key=value ..." per line; "" when there is none.
+ * From soma.yaml's "appendages:" section or /api/config's "appendages" object; either replaces
+ * the list whole. Read by the registry at boot (hal_appendages.cpp).
+ */
+std::string appendages();
+
 }  // namespace soma_config

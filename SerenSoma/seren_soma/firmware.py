@@ -110,9 +110,11 @@ def find(state: Path, version: str) -> Optional[Staged]:
     return next((s for s in staged(state) if s.version == v), None)
 
 
-def stage_bytes(state: Path, version: str, data: bytes, source: str, keep: int = 3) -> Staged:
-    """Keep an image under <state>/firmware as soma-<version>.bin, replacing one of that version,
-    and keep only the newest few."""
+def stage_bytes(state: Path, version: str, data: bytes, source: str) -> Staged:
+    """Keep an image under <state>/firmware as soma-<version>.bin, replacing one of that version.
+    Nothing else is dropped to make room: an image leaves only when someone removes it (``unstage``).
+    It used to keep the newest three, and on 18 Nov 2026 a third bench build would have deleted the
+    release that was the way back."""
     v = check_version(version)
     check_image(data)
     d = firmware_dir(state)
@@ -128,13 +130,29 @@ def stage_bytes(state: Path, version: str, data: bytes, source: str, keep: int =
                    source=source, staged_at=time.time())
     rows = [s for s in staged(state) if s.version != v]
     rows.insert(0, entry)
-    for old in rows[keep:]:
-        try:
-            (d / old.file).unlink()
-        except OSError:
-            pass
-    rows = rows[:keep]
-    _index(state).write_text(json.dumps([asdict(s) for s in rows], indent=1), encoding="utf-8")
+    _write_index(state, rows)
+    return entry
+
+
+def _write_index(state: Path, rows: list[Staged]) -> None:
+    tmp = _index(state).with_suffix(".new")
+    tmp.write_text(json.dumps([asdict(s) for s in rows], indent=1), encoding="utf-8")
+    os.replace(tmp, _index(state))
+
+
+def unstage(state: Path, version: str) -> Staged:
+    """Remove a staged image, the file and its line. Whether it may go (it's armed, say) is the
+    caller's to decide; this only says when there is nothing by that version to remove."""
+    v = check_version(version)
+    rows = staged(state)
+    entry = next((s for s in rows if s.version == v), None)
+    if entry is None:
+        raise FirmwareError(f"{v} isn't staged here")
+    _write_index(state, [s for s in rows if s.version != v])
+    try:
+        (firmware_dir(state) / entry.file).unlink()
+    except OSError:
+        pass
     return entry
 
 

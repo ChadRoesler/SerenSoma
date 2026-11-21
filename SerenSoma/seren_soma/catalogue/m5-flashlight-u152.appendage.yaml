@@ -1,0 +1,38 @@
+# M5 Unit FlashLight (U152), stock, torch mode: the base file for a light.
+#
+# A draft of the appendage file format in firmware/docs/appendages.md ("Appendage files").
+# Nothing reads this file yet; the firmware's pwm kind and Soma's import are still to build.
+
+appendage: 1
+name: light
+title: M5 Unit FlashLight (U152), stock, torch mode
+by: Chad and Wren
+kind: pwm
+provides: [light]
+
+pins:
+  en: {hint: "Port B, the yellow wire", default: 9}
+
+pwm:
+  pin: en
+  # What a level means is the pwm kind's own rule, the same on every light: level 1 is 0.6% of this
+  # light's full output, level 100 is all of it, and the levels between climb by equal ratios.
+  # This file says only how this chip answers, so the kind can work out the pulse for a level.
+  response:
+    measured: "2026-11-19, the robot's light sensor (LTR-553 at gain 96), build 0.0.0-dev.1119.1251"
+    period_us: 1000             # measured at 1 kHz
+    # [pulse length, light it makes], both in microseconds of a 1000 us cycle. Every pulse loses
+    # about 48 us at its start while the chip turns on; 50 us or less makes no light at all.
+    points: [[60, 3], [70, 18], [80, 30], [90, 41], [100, 52], [120, 74],
+             [150, 109], [200, 160], [419, 395], [706, 685], [1000, 1000]]
+    slowest_hz: 200             # slower dims further but flickers when the eye moves
+    longest_pulse_us: 850       # a gap under about 60 us isn't seen: past this, hold it steady
+
+limits:
+  on_ms: 5000                   # every on ends by itself; this when nobody says
+  on_ms_max: 600000
+
+night:
+  ceiling: 28                   # 2.4% of full; the top of what Chad called comfortable is 32
+
+calibrate: ambient              # remeasure `response` against the robot's light sensor

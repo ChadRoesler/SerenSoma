@@ -72,13 +72,39 @@ def test_a_release_is_checked_against_its_sums():
         fw.verified_app(_release(), z, f"{'0' * 64}  other.zip\n")
 
 
-def test_staging_keeps_the_newest_few_and_replaces_a_version(tmp_path):
-    for v in ("0.1.0", "0.1.1", "0.1.2", "0.1.3"):
+def test_staging_keeps_every_image_and_replaces_a_version(tmp_path):
+    for v in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4"):
         fw.stage_bytes(tmp_path, v, APP, "uploaded")
-    fw.stage_bytes(tmp_path, "0.1.3", APP + b"x", "uploaded")
+    fw.stage_bytes(tmp_path, "0.1.4", APP + b"x", "uploaded")
     kept = fw.staged(tmp_path)
-    assert [s.version for s in kept] == ["0.1.3", "0.1.2", "0.1.1"] and kept[0].size == len(APP) + 1
+    # nothing falls off: the oldest is still there, file and all, and a version staged twice is there once
+    assert [s.version for s in kept] == ["0.1.4", "0.1.3", "0.1.2", "0.1.1", "0.1.0"] and kept[0].size == len(APP) + 1
+    assert (tmp_path / "firmware" / "soma-0.1.0.bin").exists()
+
+
+def test_an_image_leaves_only_when_it_is_removed(tmp_path):
+    for v in ("0.1.0", "0.1.1"):
+        fw.stage_bytes(tmp_path, v, APP, "uploaded")
+    gone = fw.unstage(tmp_path, "fw-v0.1.0")
+    assert gone.version == "0.1.0" and [s.version for s in fw.staged(tmp_path)] == ["0.1.1"]
     assert not (tmp_path / "firmware" / "soma-0.1.0.bin").exists()
+    with pytest.raises(fw.FirmwareError, match="isn't staged"):
+        fw.unstage(tmp_path, "0.1.0")
+
+
+def test_removing_through_the_server_spares_the_armed_one(tmp_path):
+    async def go(client, auth, link, rebooted):
+        for v in ("0.2.0", "0.3.0"):
+            await client.put(f"/firmware/upload?version={v}", data=APP, headers=auth)
+        await client.post("/firmware/install", json={"version": "0.3.0", "reboot": False}, headers=auth)
+        armed = await client.delete("/firmware/staged/0.3.0", headers=auth)
+        other = await client.delete("/firmware/staged/0.2.0", headers=auth)
+        again = await client.delete("/firmware/staged/0.2.0", headers=auth)
+        bare = await client.delete("/firmware/staged/0.3.0")
+        listing = await (await client.get("/firmware", headers=auth)).json()
+        return armed.status, await armed.text(), other.status, again.status, bare.status, [s["version"] for s in listing["staged"]]
+    armed, why, other, again, bare, left = _serve(tmp_path, go)
+    assert armed == 409 and "disarm" in why and other == 200 and again == 404 and bare == 401 and left == ["0.3.0"]
 
 
 # -- through the voice server --------------------------------------------------------------------

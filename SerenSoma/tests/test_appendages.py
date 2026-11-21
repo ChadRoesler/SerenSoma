@@ -46,17 +46,40 @@ def test_two_with_one_name_are_refused():
         ap.clean_plan({"appendages": [_light("l", 8), _light("l", 9)]})
 
 
-def test_both_lights_may_share_one_dimming_line_but_not_an_enable():
-    shared = ap.check(ap.clean_plan({"appendages": [_light("a", 8, 5), _light("b", 9, 5)]}))
-    assert shared["problems"] == [] and shared["pins"]["5"] == ["a.flash", "b.flash"]
+def test_two_lights_cant_share_an_enable():
     clash = ap.check(ap.clean_plan({"appendages": [_light("a", 8), _light("b", 8)]}))
     assert clash["problems"] == ["GPIO 8 is claimed by a.en and b.en"]
     assert not clash["appendages"]["a"]["ok"] and not clash["appendages"]["b"]["ok"]
 
 
-def test_a_dimming_line_cant_share_with_something_else():
-    plan = [_light("a", 8, 10), {"name": "fan", "kind": "fan", "on": True, "pins": {"pwm": 10}, "opts": {}}]
-    assert ap.check(ap.clean_plan({"appendages": plan}))["problems"] == ["GPIO 10 is claimed by a.flash and fan.pwm"]
+def test_a_stock_flashlight_has_no_dimming_line():
+    # the white-wire mod isn't built, and the firmware refuses a line with flash= in it
+    with pytest.raises(ap.PlanError, match="no pin called 'flash'"):
+        ap.clean_plan({"appendages": [_light("a", 8, 5)]})
+
+
+def test_the_bodys_infrared_pins_are_not_free():
+    plan = [{"name": "fan", "kind": "fan", "on": True, "pins": {"pwm": 10}, "opts": {}},
+            {"name": "sw", "kind": "switch", "on": True, "pins": {"in": 5}, "opts": {}}]
+    assert ap.check(ap.clean_plan({"appendages": plan}))["problems"] == [
+        "the base uses GPIO 5 (the body's infrared LED)", "the base uses GPIO 10 (the body's infrared receiver)"]
+    assert set(ap.FREE_PINS) == {1, 2, 8, 9, 17, 18}
+
+
+def test_the_default_plan_is_what_is_plugged_in():
+    assert ap.robot_list(ap.clean_plan({"appendages": ap.DEFAULT_PLAN})) == {"light": "flashlight en=9"}
+
+
+def test_what_goes_to_the_robot_is_the_ticked_ones_and_only_if_they_can_work():
+    off = {"name": "fan", "kind": "fan", "on": False, "pins": {"pwm": 1}, "opts": {}}
+    assert ap.robot_list(ap.clean_plan({"appendages": [_light("light", 9), off]})) == {"light": "flashlight en=9"}
+    with pytest.raises(ap.PlanError, match="the firmware has no fan yet"):
+        ap.robot_list(ap.clean_plan({"appendages": [_light("light", 9), dict(off, on=True)]}))
+    with pytest.raises(ap.PlanError, match="a: GPIO 8 is claimed by a.en and b.en"):
+        ap.robot_list(ap.clean_plan({"appendages": [_light("a", 8), _light("b", 8)]}))
+    assert ap.robot_list(ap.clean_plan({"appendages": [_light("light", 9, on=False)]})) == {}
+    with pytest.raises(ap.PlanError, match="route's name"):
+        ap.clean_plan({"appendages": [_light("apply", 9)]})
 
 
 def test_base_pins_and_pins_the_board_doesnt_bring_out_are_refused():
@@ -76,14 +99,31 @@ def test_the_card_line_is_what_the_firmware_will_read():
 
 # -- the routes ----------------------------------------------------------------------------------
 
-def _serve(tmp_path, go, robot_has_appendages=False):
+def _serve(tmp_path, go, robot_has_appendages=False, seen=None):
+    """seen: a list the stand-in robot appends (path, token header, body) to, for every POST it gets."""
     async def listing(request):
         return web.json_response({"appendages": [{"name": "light_left", "kind": "flashlight", "ok": True}]})
+
+    async def config(request):
+        body = await request.json()
+        seen.append((request.path, request.headers.get("X-StackChan-Token"), body))
+        return web.json_response({"ok": True, "changed": ["appendages"] if "appendages" in body else [], "rebooting": True})
+
+    async def act(request):
+        body = await request.json()
+        seen.append((request.path, request.headers.get("X-StackChan-Token"), body))
+        if request.match_info["name"] != "light":
+            return web.json_response({"ok": False, "error": "no appendage is called that"}, status=404)
+        if body.get("level", 1) > 100:
+            return web.json_response({"ok": False, "error": "level is 1 to 100"}, status=400)
+        return web.json_response({"ok": True, "name": "light", "state": {"on": body["action"] != "off"}})
 
     async def run():
         robot = web.Application()
         if robot_has_appendages:
             robot.router.add_get("/api/appendages", listing)
+            robot.router.add_post("/api/config", config)
+            robot.router.add_post("/api/appendages/{name}", act)
         async with TestServer(robot) as robot_server:
             state = tmp_path / "state"
             y = tmp_path / "soma.yaml"
@@ -117,3 +157,47 @@ def test_the_robots_own_list_is_passed_through_once_it_has_one(tmp_path):
         return await (await client.get("/appendages", headers=auth)).json()
     body = _serve(tmp_path, go, robot_has_appendages=True)
     assert body["robot"] == {"reported": True, "appendages": [{"name": "light_left", "kind": "flashlight", "ok": True}]}
+
+
+def test_send_to_the_robot_saves_the_ticked_ones_and_restarts_it(tmp_path):
+    seen = []
+
+    async def go(client, auth, state):
+        sent = await client.post("/appendages/apply", headers=auth)
+        await client.put("/appendages", headers=auth, json={"appendages": [_light("a", 8), _light("b", 8)]})
+        clash = await client.post("/appendages/apply", headers=auth)
+        return sent.status, await sent.json(), clash.status, await clash.text(), (await client.post("/appendages/apply")).status
+    status, body, clash, why, unasked = _serve(tmp_path, go, robot_has_appendages=True, seen=seen)
+    assert (status, body) == (200, {"ok": True, "sent": {"light": "flashlight en=9"}, "rebooting": True})
+    assert seen == [("/api/config", "robot-secret", {"appendages": {"light": "flashlight en=9"}, "reboot": True})]
+    assert clash == 400 and "GPIO 8 is claimed" in why and unasked == 401      # a plan that can't work never reaches it
+
+
+def test_an_action_goes_to_the_robot_and_its_answer_comes_back_as_it_is(tmp_path):
+    seen = []
+
+    async def go(client, auth, state):
+        on = await client.post("/appendages/light", headers=auth, json={"action": "on", "level": 24, "ms": 5000})
+        too = await client.post("/appendages/light", headers=auth, json={"action": "on", "level": 150})
+        nobody = await client.post("/appendages/lamp", headers=auth, json={"action": "on"})
+        shapeless = await client.post("/appendages/light", headers=auth, json={"level": 3})
+        unasked = await client.post("/appendages/light", json={"action": "off"})
+        return (on.status, await on.json(), too.status, await too.json(), nobody.status, await nobody.json(),
+                shapeless.status, unasked.status)
+    on, on_body, too, too_body, nobody, nobody_body, shapeless, unasked = _serve(
+        tmp_path, go, robot_has_appendages=True, seen=seen)
+    assert (on, on_body) == (200, {"ok": True, "name": "light", "state": {"on": True}})
+    assert seen[0] == ("/api/appendages/light", "robot-secret", {"action": "on", "level": 24, "ms": 5000})
+    assert (too, too_body["error"]) == (400, "level is 1 to 100")          # the robot's own reason, untouched
+    assert (nobody, nobody_body["error"]) == (404, "no appendage is called that")
+    assert (shapeless, unasked) == (400, 401) and len(seen) == 3            # neither of those reached the robot
+
+
+def test_firmware_from_before_the_registry_is_said_plainly_for_actions_too(tmp_path):
+    async def go(client, auth, state):
+        r = await client.post("/appendages/light", headers=auth, json={"action": "on"})
+        a = await client.post("/appendages/apply", headers=auth)
+        return r.status, await r.text(), a.status
+    status, text, apply_status = _serve(tmp_path, go)
+    assert status == 502 and "needs a build with the registry" in text and apply_status == 502
+

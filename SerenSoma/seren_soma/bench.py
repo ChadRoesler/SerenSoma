@@ -21,6 +21,9 @@ from aiohttp import ClientError, ClientTimeout, web
 ROBOT_GET = ("touch-probe", "touch-raw", "screen-touch", "servo", "status")
 ROBOT_POST = ("touch-probe", "servo", "head", "leds")
 
+FAN_ADDR = 0x18
+FAN_PWM_HZ = {0: 1000, 1: 12000, 2: 24000, 3: 48000}   # its register 0x10
+
 CHANNELS = 12
 LEDS = 12
 MAX_POINTS = 600
@@ -164,8 +167,61 @@ class Bench:
     async def robot_post(self, request):
         return await self._robot(request, "POST", ROBOT_POST)
 
+    # -- the fan, until the appendage files are built ------------------------------------------------
+    # M5 Module Fan v1.1 at 0x18, through the robot's POST /api/bench-i2c, which writes only the fan's
+    # on/off (0x00) and speed (0x20). This route goes further: it names the fan's registers itself, so
+    # the page can't reach any other address through it. The catalogue file says the same registers.
+
+    async def _i2c(self, body: dict) -> dict:
+        url = f"{self.link.args.robot_url.rstrip('/')}/api/bench-i2c"
+        try:
+            async with self.link.http.post(url, headers=dict(self.link.robot_headers()), json=body,
+                                           timeout=ClientTimeout(total=5)) as r:
+                data = await r.json(content_type=None)
+                if r.status == 404:
+                    raise web.HTTPBadGateway(text="this robot's firmware has no /api/bench-i2c: it needs a build with the bench")
+                if r.status != 200 or not data.get("ok"):
+                    raise web.HTTPBadGateway(text=f"the robot said: {data.get('error') or r.status}")
+                return data
+        except (ClientError, asyncio.TimeoutError) as e:
+            raise web.HTTPBadGateway(text=f"the robot didn't answer at {self.link.args.robot_url}: {e or type(e).__name__}")
+
+    async def _fan_state(self) -> dict:
+        def one(data):
+            return data["bytes"][0]
+        on = one(await self._i2c({"addr": FAN_ADDR, "reg": 0x00, "len": 1}))
+        speed = one(await self._i2c({"addr": FAN_ADDR, "reg": 0x20, "len": 1}))
+        rpm = await self._i2c({"addr": FAN_ADDR, "reg": 0x30, "len": 2})
+        hz = one(await self._i2c({"addr": FAN_ADDR, "reg": 0x10, "len": 1}))
+        return {"ok": True, "enabled": bool(on), "speed": speed, "rpm": rpm["bytes"][0] | (rpm["bytes"][1] << 8),
+                "pwmHz": FAN_PWM_HZ.get(hz, None)}
+
+    async def fan_get(self, request):
+        """GET /bench/fan: whether it's enabled, its speed 0..100, its RPM, and its PWM frequency."""
+        self.link.authorized(request)
+        return web.json_response(await self._fan_state())
+
+    async def fan_post(self, request):
+        """POST /bench/fan {"speed": 0..100}: 0 stops it, anything else enables it at that speed.
+        The answer is its state a moment later; the RPM takes a second or two to settle."""
+        self.link.authorized(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise web.HTTPBadRequest(text='expected {"speed": 0..100}')
+        speed = body.get("speed") if isinstance(body, dict) else None
+        if isinstance(speed, bool) or not isinstance(speed, int) or not 0 <= speed <= 100:
+            raise web.HTTPBadRequest(text="speed is a whole number from 0 (stop) to 100")
+        if speed > 0:
+            await self._i2c({"addr": FAN_ADDR, "reg": 0x00, "write": 1})
+        await self._i2c({"addr": FAN_ADDR, "reg": 0x20, "write": speed})
+        await asyncio.sleep(0.3)
+        return web.json_response(await self._fan_state())
+
     def add_routes(self, app: web.Application) -> None:
         app.router.add_get("/bench/map", self.map_get)
         app.router.add_put("/bench/map", self.map_put)
+        app.router.add_get("/bench/fan", self.fan_get)
+        app.router.add_post("/bench/fan", self.fan_post)
         app.router.add_get("/bench/{what}", self.robot_get)
         app.router.add_post("/bench/{what}", self.robot_post)

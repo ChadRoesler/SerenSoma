@@ -21,6 +21,7 @@
 #include <mutex>
 #include "stackchan_camera.h"
 #include "hal_bridge.h"
+#include <cstring>
 #include <hal/hal.h>
 #include <hal/rails.h>
 
@@ -199,6 +200,75 @@ public:
         level = battery_level;
         return ESP_OK;
     }
+
+    /** The chip's status and its ADC block (switched on in the constructor, reg 0x30), in two reads. */
+    esp_err_t TryReadPowerDetail(hal_bridge::PowerDetail& out)
+    {
+        uint8_t status[2] = {0};
+        esp_err_t err     = TryReadRegs(0x00, status, sizeof(status));
+        if (err != ESP_OK) {
+            return err;
+        }
+        uint8_t adc[10] = {0};  // 0x34 VBAT, 0x36 TS, 0x38 VBUS, 0x3A VSYS, 0x3C die temperature; high byte first
+        err             = TryReadRegs(0x34, adc, sizeof(adc));
+        if (err != ESP_OK) {
+            return err;
+        }
+        std::memcpy(out.raw, status, sizeof(status));
+        std::memcpy(out.raw + sizeof(status), adc, sizeof(adc));
+
+        out.usb_good        = status[0] & 0b00100000;
+        out.battery_present = status[0] & 0b00001000;
+        out.input_limited   = (status[0] & 0b00000001) || (status[1] & 0b00001000);
+        out.direction       = (status[1] & 0b01100000) >> 5;
+        out.phase           = status[1] & 0b00000111;
+
+        out.battery_mv      = ((adc[0] & 0x1F) << 8) | adc[1];  // 1 mV a step
+        out.usb_mv          = ((adc[4] & 0x3F) << 8) | adc[5];
+        out.system_mv       = ((adc[6] & 0x3F) << 8) | adc[7];
+        const int temp_raw  = ((adc[8] & 0x3F) << 8) | adc[9];
+        out.chip_temp_dc    = 220 + (7274 - temp_raw) / 2;  // 22 C + (7274 - raw) / 20, in tenths
+        return ESP_OK;
+    }
+};
+
+/**
+ * The body's own battery monitor: an INA226 at 0x41 on the power board, across a 10 milliohm
+ * shunt in the battery line (M5's StackChan power schematic, "Battery Current and Voltage
+ * Monitor"). It measures current, which the AXP2101 cannot. Its registers are 16 bits, high
+ * byte first, and it converts continuously from power-on, so there is nothing to set up.
+ */
+class Ina226 : public I2cDevice {
+public:
+    Ina226(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr)
+    {
+    }
+
+    /** Millivolts on the battery line and quarter-milliamps through the shunt, signed as the chip reads them. */
+    esp_err_t TryRead(int& bus_mv, int& current_qma)
+    {
+        uint8_t id[2] = {0};
+        esp_err_t err = TryReadRegs(0xFE, id, sizeof(id));
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (id[0] != 0x54 || id[1] != 0x49) {  // "TI": anything else at this address is not this chip
+            return ESP_ERR_NOT_FOUND;
+        }
+        uint8_t shunt[2] = {0};
+        uint8_t bus[2]   = {0};
+        err              = TryReadRegs(0x01, shunt, sizeof(shunt));
+        if (err == ESP_OK) {
+            err = TryReadRegs(0x02, bus, sizeof(bus));
+        }
+        if (err != ESP_OK) {
+            return err;
+        }
+        // shunt: 2.5 uV a step across 10 milliohms is 0.25 mA a step. bus: 1.25 mV a step.
+        current_qma = static_cast<int16_t>((shunt[0] << 8) | shunt[1]);
+        bus_mv      = (((bus[0] << 8) | bus[1]) * 5) / 4;
+        return ESP_OK;
+    }
 };
 
 class CustomBacklight : public Backlight {
@@ -356,6 +426,7 @@ private:
 
     i2c_master_bus_handle_t i2c_bus_;
     Pmic* pmic_;
+    Ina226* ina226_ = nullptr;
     Aw9523* aw9523_;
     Ft6336* ft6336_;
     LvglDisplay* display_;
@@ -518,6 +589,7 @@ private:
     {
         ESP_LOGI(TAG, "Init AXP2101");
         pmic_ = new Pmic(i2c_bus_, 0x34);
+        ina226_ = new Ina226(i2c_bus_, 0x41);  // on the body, not the core: reads fail quietly without one
     }
 
     void InitializeAw9523()
@@ -772,6 +844,15 @@ public:
     {
         return i2c_bus_;
     }
+
+    bool ReadPowerDetail(hal_bridge::PowerDetail& out)
+    {
+        if (pmic_ == nullptr || pmic_->TryReadPowerDetail(out) != ESP_OK) {
+            return false;
+        }
+        out.monitor_ok = ina226_ != nullptr && ina226_->TryRead(out.monitor_mv, out.monitor_qma) == ESP_OK;
+        return true;
+    }
 };
 
 DECLARE_BOARD(M5StackCoreS3Board);
@@ -831,6 +912,12 @@ int hal_bridge::board_get_battery_level()
     } else {
         return 100;
     }
+}
+
+bool hal_bridge::board_read_power_detail(PowerDetail& out)
+{
+    auto& board = (M5StackCoreS3Board&)Board::GetInstance();
+    return board.ReadPowerDetail(out);
 }
 
 bool hal_bridge::board_is_battery_charging()

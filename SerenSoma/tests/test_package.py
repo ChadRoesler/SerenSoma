@@ -207,3 +207,41 @@ def test_the_touch_feed_carries_the_hand_and_no_overwhelm(tmp_path):
     feed, settings = _serve(_cfg(tmp_path), go)
     assert feed["hand"] == {"down": False} and "overwhelm" not in feed
     assert "overwhelm" not in settings and "work_hours" in settings   # work hours stay: a fact about the house
+
+
+def test_night_has_a_ceiling_for_appendage_lights(tmp_path):
+    """Settings saved before the flashlight existed get the default ceiling, and it is 0 to 100 like the rest."""
+    import json
+    import pytest
+    from seren_soma import voice
+    was = voice.STATE
+    voice.use_state(tmp_path)
+    try:
+        (tmp_path / "settings.json").write_text(json.dumps(
+            {"night": {"enabled": True, "start": "22:30", "end": "07:00", "dimmer": 15, "volume": 30, "brightness": 20}}),
+            encoding="utf-8")
+        s = voice.load_settings()
+        assert s["night"]["light"] == voice.DEFAULT_SETTINGS["night"]["light"] == 28
+        assert s["night"]["enabled"] is True
+        assert voice.merge_settings(s, {"night": {"light": 0}})["night"]["light"] == 0
+        with pytest.raises(ValueError):
+            voice.merge_settings(s, {"night": {"light": 101}})
+    finally:
+        voice.use_state(was)
+
+
+def test_night_ceilings_by_appendage_name_merge_and_hand_back():
+    """night.appendages merges by name; null hands one back to its own file's default; nothing else gets in."""
+    import pytest
+    from seren_soma import voice
+    s = voice.load_settings()
+    assert s["night"]["appendages"] == {}                          # nobody set one: each holds its file's default
+    s = voice.merge_settings(s, {"night": {"appendages": {"light": 28, "fan": 20}}})
+    s = voice.merge_settings(s, {"night": {"appendages": {"fan": 35}}})
+    assert s["night"]["appendages"] == {"light": 28, "fan": 35}   # by name: the light stays
+    s = voice.merge_settings(s, {"night": {"appendages": {"light": None}}})
+    assert s["night"]["appendages"] == {"fan": 35}
+    for bad in ({"fan": 0}, {"fan": 101}, {"fan": True}, {"Fan Two": 20}, {"../x": 20}, [20]):
+        with pytest.raises(ValueError):
+            voice.merge_settings(s, {"night": {"appendages": bad}})
+

@@ -37,7 +37,7 @@ where = ["."]
 include = ["seren_soma*"]
 
 [tool.setuptools.package-data]
-seren_soma = ["viewer/ui/*.html", "viewer/ui/*.css", "viewer/ui/*.js"]
+seren_soma = ["viewer/ui/*.html", "viewer/ui/*.css", "viewer/ui/*.js", "catalogue/*.yaml", "catalogue/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

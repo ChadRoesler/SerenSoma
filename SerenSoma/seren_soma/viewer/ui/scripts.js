@@ -101,11 +101,34 @@ async function loadFirmware() {
   $("fwFacts").innerHTML = [["The robot runs", f.robot || "?"], ["Armed", f.armed ? f.armed.version : "nothing"],
                             ["Releases from", f.repo || "?"]]
     .map(([k, v]) => `<span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b>`).join("");
-  $("fwRows").innerHTML = (f.staged || []).map(s =>
-    `<tr><td>${escapeHtml(s.version)}</td><td>${escapeHtml(s.source)}</td><td>${Math.round(s.size / 1024)} KB</td>` +
-    `<td><button class="btn" data-fw="${escapeHtml(s.version)}">Install</button></td></tr>`).join("") ||
-    `<tr><td colspan="4" class="muted tiny">Nothing staged yet.</td></tr>`;
-  $("fwRows").querySelectorAll("button[data-fw]").forEach(b => b.onclick = () => installFirmware(b.dataset.fw));
+  // Nothing falls off this list by itself. The newest few show; the rest wait under Previous versions.
+  const staged = f.staged || [], armed = f.armed ? f.armed.version : null;
+  const row = s => {
+    const note = [s.version === f.robot ? "on the robot" : "", s.version === armed ? "armed" : ""].filter(Boolean).join(", ");
+    return `<tr><td>${escapeHtml(s.version)}${note ? ` <span class="muted tiny">${note}</span>` : ""}</td>` +
+      `<td>${escapeHtml(s.source)}</td><td>${Math.round(s.size / 1024)} KB</td>` +
+      `<td class="num">${new Date(s.staged_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</td>` +
+      `<td><button class="btn" data-fw="${escapeHtml(s.version)}">Install</button> ` +
+      `<button class="btn" data-fwdrop="${escapeHtml(s.version)}"${s.version === armed ? " disabled" : ""}>Remove</button></td></tr>`;
+  };
+  $("fwRows").innerHTML = staged.slice(0, FW_SHOWN).map(row).join("") ||
+    `<tr><td colspan="5" class="muted tiny">Nothing staged yet.</td></tr>`;
+  const older = staged.slice(FW_SHOWN);
+  $("fwOlder").hidden = !older.length;
+  $("fwOlderCount").textContent = older.length;
+  $("fwOldRows").innerHTML = older.map(row).join("");
+  document.querySelectorAll("#firmware button[data-fw]").forEach(b => b.onclick = () => installFirmware(b.dataset.fw));
+  document.querySelectorAll("#firmware button[data-fwdrop]").forEach(b => b.onclick = () => removeFirmware(b.dataset.fwdrop));
+}
+const FW_SHOWN = 3;
+
+async function removeFirmware(version) {
+  if (!confirm(`Remove ${version} from this box? The robot is not touched. A release can be fetched again; ` +
+               "a build of your own is gone unless you still have the file.")) return;
+  try {
+    await call(`/firmware/staged/${encodeURIComponent(version)}`, { method: "DELETE" });
+    say("fwMsg", `Removed ${version}.`); loadFirmware();
+  } catch (e) { say("fwMsg", e.message, true); }
 }
 
 async function fetchFirmware() {
@@ -756,9 +779,166 @@ document.addEventListener("DOMContentLoaded", () => {
   $("tkOff").onclick = () => setTalk({ on: false });
 });
 
-// ── Diagnostics: the stock body's four benches under one tab ─────────
+// -- power --
+// What the power chip measures, from the robot's /api/status, and how it moves while you watch.
+// Two strips and not one chart with two scales: the battery and the USB input sit a volt apart and
+// what matters in each is a movement of tens of millivolts.
+const PW = { on: false, rows: [], max: 900, hover: null };
+const volts = mv => (mv / 1000).toFixed(3) + " V";
+const clock = t => new Date(t).toLocaleTimeString([], { hour12: false });
+const DIRECTION = { charging: "into the battery", discharging: "out of the battery", standby: "neither way" };
+const nearest = (rows, t) => rows.reduce((best, c) => Math.abs(c.t - t) < Math.abs(best.t - t) ? c : best);
+
+function powerTake(s) {
+  const p = s.power, row = { t: Date.now(), pct: s.batteryLevel, flag: s.charging, fw: s.firmware };
+  if (p) Object.assign(row, { mv: p.batteryMv, usb: p.usbMv, sys: p.systemMv, dir: p.direction, phase: p.phase,
+    limited: p.inputLimited, good: p.usbGood, present: p.batteryPresent, temp: p.chipTempC, raw: p.raw });
+  // the body's battery monitor, on a firmware and a body that have one: the only current reading
+  if (p && p.monitorMa != null) { row.ma = p.monitorMa; row.bodyMv = p.monitorMv; }
+  PW.rows.push(row);
+  if (PW.rows.length > PW.max) PW.rows.shift();
+}
+
+function powerEvents() {
+  const out = [], seen = PW.rows;
+  for (let i = 1; i < seen.length; i++) {
+    const a = seen[i - 1], b = seen[i];
+    if (b.miss && !a.miss) out.push([b.t, "the robot did not answer"]);
+    if (a.miss && !b.miss) out.push([b.t, "it answered again"]);
+    if (a.miss || b.miss) continue;
+    if (a.fw !== b.fw) out.push([b.t, `firmware ${a.fw} → ${b.fw}`]);
+    if (a.dir !== b.dir) out.push([b.t, `current ${DIRECTION[a.dir] || a.dir} → ${DIRECTION[b.dir] || b.dir}`]);
+    if (a.phase !== b.phase) out.push([b.t, `charge phase ${a.phase} → ${b.phase}`]);
+    if (a.good !== b.good) out.push([b.t, b.good ? "USB input became usable" : "USB input stopped being usable"]);
+    if (a.limited !== b.limited) out.push([b.t, b.limited ? "the chip started holding back" : "the chip stopped holding back"]);
+    if (a.pct !== b.pct) out.push([b.t, `gauge ${a.pct}% → ${b.pct}%`]);
+  }
+  return out;
+}
+
+const TREND = { left: 56, right: 12, top: 10, bottom: 18 };
+// floor: the least height the strip shows (noise is not news); label: how a value on the axis reads.
+function drawTrend(id, key, floor = 60, label = v => (v / 1000).toFixed(3)) {
+  const cv = $(id), g = cv.getContext("2d"), css = getComputedStyle(document.documentElement);
+  const dim = css.getPropertyValue("--text-dim"), { left, right, top, bottom } = TREND;
+  g.clearRect(0, 0, cv.width, cv.height);
+  g.font = "10px " + css.getPropertyValue("--mono"); g.fillStyle = dim;
+  const rows = PW.rows, pts = rows.filter(r => r[key] != null);
+  if (pts.length < 2) { g.fillText(pts.length ? "one reading so far" : "no readings yet", left, cv.height / 2); return; }
+  const t0 = rows[0].t, t1 = rows[rows.length - 1].t, span = Math.max(t1 - t0, 1000);
+  let lo = Math.min(...pts.map(r => r[key])), hi = Math.max(...pts.map(r => r[key]));
+  const pad = Math.max((floor - (hi - lo)) / 2, (hi - lo) * 0.1);
+  lo -= pad; hi += pad;
+  const x = t => left + (t - t0) / span * (cv.width - left - right);
+  const y = v => top + (hi - v) / (hi - lo) * (cv.height - top - bottom);
+  g.strokeStyle = css.getPropertyValue("--border"); g.lineWidth = 1;
+  [hi, (hi + lo) / 2, lo].forEach(v => {
+    g.beginPath(); g.moveTo(left, y(v)); g.lineTo(cv.width - right, y(v)); g.stroke();
+    g.fillText(label(v), 4, y(v) + 3);
+  });
+  const end = clock(t1);
+  g.fillText(clock(t0), left, cv.height - 4); g.fillText(end, cv.width - right - g.measureText(end).width, cv.height - 4);
+  g.strokeStyle = css.getPropertyValue("--accent"); g.lineWidth = 2; g.lineJoin = "round"; g.beginPath();
+  let pen = false;                                                // lifted where a reading is missing
+  rows.forEach(r => {
+    if (r[key] == null) { pen = false; return; }
+    if (pen) g.lineTo(x(r.t), y(r[key])); else g.moveTo(x(r.t), y(r[key]));
+    pen = true;
+  });
+  g.stroke();
+  if (PW.hover != null) {
+    const r = nearest(pts, PW.hover);
+    g.strokeStyle = dim; g.lineWidth = 1; g.beginPath(); g.moveTo(x(r.t), top); g.lineTo(x(r.t), cv.height - bottom); g.stroke();
+    g.fillStyle = css.getPropertyValue("--accent"); g.beginPath(); g.arc(x(r.t), y(r[key]), 4, 0, 2 * Math.PI); g.fill();
+  }
+}
+const drawTrends = () => {
+  drawTrend("pwBatt", "mv"); drawTrend("pwUsb", "usb");
+  const has = PW.rows.some(r => r.ma != null);
+  $("pwAmpsWrap").hidden = !has;
+  if (has) drawTrend("pwAmps", "ma", 40, v => v.toFixed(0));
+};
+
+function paintPower() {
+  const last = PW.rows.filter(r => !r.miss).pop(), first = PW.rows.find(r => r.mv != null);
+  if (!last) { $("pwFacts").innerHTML = ""; }
+  else if (last.mv == null) {
+    $("pwFacts").innerHTML = facts([["Battery", `${last.pct}% by the chip's gauge`], ["Charging flag", last.flag ? "yes" : "no"],
+      ["Firmware", last.fw]]);
+    say("pwMsg", "This robot's firmware reports only the percentage and the flag. It needs a build with the power readings.", true);
+  } else {
+    const moved = last.mv - first.mv, secs = Math.round((last.t - first.t) / 1000);
+    $("pwFacts").innerHTML = facts([
+      ["Battery", `${volts(last.mv)}, ${last.pct}% by the chip's gauge${last.present ? "" : ", and the chip sees no battery"}`],
+      ["USB in", `${volts(last.usb)}, ${last.good ? "usable" : "not usable"}`],
+      ["System", volts(last.sys)],
+      ...(last.ma == null ? [["Battery current", "this body or firmware has no monitor to read it from"]] : [
+        // the sign was settled on the robot, 19 Nov 2026: negative is current into the battery
+        ["Battery current", `${Math.abs(last.ma).toFixed(1)} mA ${last.ma < 0 ? "into the battery" : last.ma > 0 ? "out of the battery" : "either way"}, by the body's monitor`],
+        ["Battery, at the body", volts(last.bodyMv)]]),
+      ["Current", DIRECTION[last.dir] || last.dir],
+      ["Charge phase", last.phase],
+      ["Held back", last.limited ? "yes: the input sags or is at its limit" : "no"],
+      ["Chip", `${last.temp.toFixed(1)} °C`],
+      ["Since you started", secs < 4 ? "just now"
+        : `battery ${moved >= 0 ? "+" : "−"}${Math.abs(moved)} mV in ${secs < 120 ? secs + " s" : ago(secs)}`],
+      ["Raw", last.raw],
+    ]);
+  }
+  drawTrends();
+  const ev = powerEvents().slice(-12).reverse();
+  $("pwEvents").innerHTML = ev.map(([t, what]) => `<div><span>${clock(t)}</span>${escapeHtml(what)}</div>`).join("")
+    || `<span>Nothing yet.</span>`;
+  const misses = PW.rows.filter(r => r.miss).length;
+  $("pwRate").textContent = PW.rows.length ? `${PW.rows.length} readings${misses ? `, ${misses} missed` : ""}` : "";
+}
+
+async function powerLoop() {
+  while (PW.on && showing("power")) {
+    const began = Date.now();
+    let failed = "";
+    try { powerTake(await getJson("/bench/status")); }
+    catch (e) { PW.rows.push({ t: Date.now(), miss: true }); failed = e.message; }
+    if (failed) say("pwMsg", failed, true); else say("pwMsg", "");
+    paintPower();
+    await sleep(Math.max(0, 2000 - (Date.now() - began)));
+  }
+  PW.on = false; $("pwWatch").textContent = "Start watching";
+}
+
+function powerCsv() {
+  if (!PW.rows.length) { say("pwMsg", "Watch for a while first.", true); return; }
+  const cell = v => v == null ? "" : v, flag = v => v == null ? "" : (v ? 1 : 0);
+  download("power.csv", "time,battery_mv,usb_mv,system_mv,body_battery_mv,body_battery_ma,gauge_percent,current,charge_phase,held_back,usb_usable,chip_c,firmware\n" +
+    PW.rows.map(r => [new Date(r.t).toISOString(), cell(r.mv), cell(r.usb), cell(r.sys), cell(r.bodyMv), cell(r.ma), cell(r.pct), cell(r.dir), cell(r.phase),
+      flag(r.limited), flag(r.good), cell(r.temp), cell(r.fw)].join(",")).join("\n") + "\n", "text/csv");
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("pwWatch").onclick = () => {
+    PW.on = !PW.on; $("pwWatch").textContent = PW.on ? "Stop watching" : "Start watching";
+    if (PW.on) powerLoop();
+  };
+  $("pwCsv").onclick = powerCsv;
+  ["pwBatt", "pwUsb", "pwAmps"].forEach(id => {
+    const cv = $(id);
+    cv.onmousemove = e => {
+      const rows = PW.rows, pts = rows.filter(r => r.mv != null);
+      if (pts.length < 2) return;
+      const px = e.offsetX * cv.width / cv.clientWidth, t0 = rows[0].t, span = Math.max(rows[rows.length - 1].t - t0, 1000);
+      PW.hover = t0 + Math.min(1, Math.max(0, (px - TREND.left) / (cv.width - TREND.left - TREND.right))) * span;
+      const r = nearest(pts, PW.hover);
+      $("pwHover").textContent = `${clock(r.t)}: battery ${volts(r.mv)}, USB in ${volts(r.usb)}, gauge ${r.pct}%, current ${DIRECTION[r.dir] || r.dir}` +
+        (r.ma == null ? "" : `, ${r.ma.toFixed(1)} mA at the body`);
+      drawTrends();
+    };
+    cv.onmouseleave = () => { PW.hover = null; $("pwHover").textContent = "Point at a line to read it."; drawTrends(); };
+  });
+});
+
+// ── Diagnostics: the stock body's five benches under one tab ─────────
 // Which one was open last is the reader's choice, and is remembered.
-const SUBS = ["voice", "servos", "lights", "touch"];
+const SUBS = ["voice", "servos", "lights", "touch", "power"];
 function showSub(id) {
   document.querySelectorAll(".subtabs .subtab").forEach(b => b.classList.toggle("active", b.dataset.sub === id));
   document.querySelectorAll(".subview").forEach(v => v.classList.toggle("active", v.id === id));
@@ -772,10 +952,12 @@ function diagOpen() {
 }
 
 // ── Appendages: the plan, checked, and what the robot says it carries ─
-// firmware/docs/appendages.md is the design. Until the firmware has its registry, the robot reports
-// nothing and the Diagnostics pane says so; the plan and its pin check are this box's.
-const AP = { data: null, sel: null };
+// firmware/docs/appendages.md is the design. The plan and its pin check are this box's; "Send to the
+// robot" makes the ticked ones the robot's list. Against firmware from before the registry the robot
+// reports nothing and the Diagnostics pane says so.
+const AP = { data: null, sel: null, level: 20, secs: 5 };   // 20: 1.6% of torch, inside what was comfortable in a dark room
 async function apOpen() {
+  fanRead();
   try { AP.data = await getJson("/appendages"); say("apMsg", ""); }
   catch (e) { say("apMsg", why(e), true); return; }
   if (!AP.data.plan.some(a => a.name === AP.sel)) AP.sel = AP.data.plan.length ? AP.data.plan[0].name : null;
@@ -808,6 +990,14 @@ function apPaint() {
   const b = chk.budget;
   $("apBudget").innerHTML = facts([["Free pins used", `${b.used} of ${b.free}`],
     ["Left", b.left.length ? b.left.map(p => `G${p}`).join(" ") : "none"]]);
+  // what the robot carries beside what is ticked here, so a list that hasn't been sent shows
+  const ticked = d.plan.filter(x => x.on).map(x => x.name).sort().join(", ") || "nothing";
+  const carried = d.robot.reported ? ((d.robot.appendages || []).map(x => x.name).sort().join(", ") || "nothing") : null;
+  $("apSync").textContent = carried === null ? d.robot.why
+    : carried === ticked ? `The robot carries what's ticked: ${carried}.`
+    : `The robot carries ${carried}; ticked here is ${ticked}. Send to the robot to make them match.`;
+  $("apApply").onclick = apApply;
+  $("apApply").disabled = carried === null;
 
   const a = d.plan.find(x => x.name === AP.sel);
   if (!a) { $("apTitle").textContent = "About it"; $("apFacts").innerHTML = ""; $("apPins").innerHTML = ""; return; }
@@ -840,8 +1030,67 @@ function apPaint() {
   const r = d.robot, there = r.reported && (r.appendages || []).find(x => x.name === a.name);
   $("apRobot").innerHTML = facts([["The robot", r.reported ? (there ? (there.ok ? "carries it" : `refused it: ${there.error || "no reason given"}`) : "doesn't list it") : r.why]]);
   $("apTest").textContent = "Self-test: " + kind.test;
-  $("apActions").innerHTML = [...kind.actions, "test"].map(x =>
-    `<button class="btn" disabled title="${there ? "" : "Needs firmware with the appendage registry"}">${escapeHtml(x)}</button>`).join("");
+  if (there && there.ok && a.kind === "flashlight") {
+    // level 1 to 100 and how long; every on ends by itself on the robot, so there is no "on until I say"
+    $("apActions").innerHTML = `
+      <label class="tiny">Level <input type="number" id="apLevel" class="appin" min="1" max="100" value="${AP.level}"></label>
+      <label class="tiny">Seconds <input type="number" id="apSecs" class="appin" min="1" max="600" value="${AP.secs}"></label>
+      <button class="btn" id="apOn">On</button><button class="btn" id="apOff">Off</button>`;
+    $("apLevel").onchange = () => { AP.level = Math.max(1, Math.min(100, Number($("apLevel").value) || 1)); };
+    $("apSecs").onchange = () => { AP.secs = Math.max(1, Math.min(600, Number($("apSecs").value) || 5)); };
+    $("apOn").onclick = () => { $("apLevel").onchange(); $("apSecs").onchange(); apAct(a.name, { action: "on", level: AP.level, ms: AP.secs * 1000 }); };
+    $("apOff").onclick = () => apAct(a.name, { action: "off" });
+  } else {
+    const whyNot = !kind.built ? "The firmware has no " + a.kind + " yet" : there ? "The robot refused it" : "The robot doesn't carry it: send it the list";
+    $("apActions").innerHTML = kind.actions.map(x =>
+      `<button class="btn" disabled title="${escapeHtml(whyNot)}">${escapeHtml(x)}</button>`).join("");
+  }
   $("apState").hidden = !there;
   if (there) $("apState").textContent = JSON.stringify(there.state || there, null, 1);
+}
+// One of an appendage's own actions, passed through to the robot. Its answer is its new state.
+async function apAct(name, body) {
+  try {
+    const ans = await (await call(`/appendages/${encodeURIComponent(name)}`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
+    const there = ((AP.data.robot || {}).appendages || []).find(x => x.name === name);
+    if (there && ans.state) there.state = ans.state;
+    say("apActMsg", body.action === "off" ? "Off." : `On at level ${ans.state.level}${ans.state.asked ? ` (asked ${ans.state.asked}; the night ceiling held it)` : ""}, ${ans.state.lightPercent ?? ans.state.onPercent}% of torch's light.`);
+  } catch (e) {
+    let text = e.message;
+    try { text = JSON.parse(text).error || text; } catch (_) { /* plain text already */ }
+    say("apActMsg", text, true);
+  }
+  apPaint();
+}
+// The fan on the bench: /bench/fan names its registers itself, so this card can't reach anything else.
+function fanShow(s) {
+  $("fanFacts").innerHTML = facts([["Running", s.enabled && s.speed > 0 ? `yes, at ${s.speed}%` : "no"],
+    ["Speed read back", `${s.rpm.toLocaleString()} RPM`], ["Drive", s.pwmHz ? `${s.pwmHz / 1000} kHz` : "unknown"]]);
+}
+async function fanRead() {
+  try { fanShow(await getJson("/bench/fan")); say("fanMsg", ""); }
+  catch (e) { say("fanMsg", why(e), true); }
+}
+async function fanSet(speed) {
+  try {
+    const s = await (await call("/bench/fan", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ speed }) })).json();
+    fanShow(s);
+    say("fanMsg", speed ? `Set to ${speed}%. The RPM settles in a second or two: Read again.` : "Stopped.");
+  } catch (e) { say("fanMsg", why(e), true); }
+}
+$("fanSpeed").oninput = () => { $("fanSpeedText").textContent = $("fanSpeed").value + "%"; };
+$("fanSet").onclick = () => fanSet(Number($("fanSpeed").value));
+$("fanStop").onclick = () => fanSet(0);
+$("fanRead").onclick = fanRead;
+
+// The ticked appendages become the robot's whole list, and it restarts to read it.
+async function apApply() {
+  if (!confirm("Save the ticked appendages on the robot? It restarts to read the list, which takes about a minute.")) return;
+  try {
+    const ans = await (await call("/appendages/apply", { method: "POST" })).json();
+    const names = Object.keys(ans.sent);
+    say("apMsg", `Sent ${names.length ? names.join(", ") : "an empty list"}. The robot is restarting; open this tab again in a minute.`);
+  } catch (e) { say("apMsg", e.message, true); }
 }

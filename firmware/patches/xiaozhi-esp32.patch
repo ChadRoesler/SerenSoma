@@ -148,6 +148,40 @@ index f2b9a00..68f01d1 100644
      void SetListeningMode(ListeningMode mode);
      ListeningMode GetDefaultListeningMode() const;
      
+diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
+index 7f7582b..7272261 100644
+--- a/main/audio/audio_service.cc
++++ b/main/audio/audio_service.cc
+@@ -1,6 +1,8 @@
+ #include "audio_service.h"
+ #include <esp_log.h>
+ #include <cstring>
++#include <esp_heap_caps.h>
++#include <freertos/idf_additions.h>
+ 
+ #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
+     (esp_ae_rate_cvt_cfg_t) {                                                                \
+@@ -160,14 +162,16 @@ void AudioService::Start() {
+         "audio_output", 2048, this, 4, &audio_output_task_handle_);
+ #endif
+ 
+-    /* Start the opus codec task */
+-    xTaskCreate(
++    /* Start the opus codec task. SerenSoma, 19 Nov 2026: its 24 KB stack lives in PSRAM, not
++       internal RAM, which the camera needs 42 KB of free to open. A test: if speech or a face's
++       sound stutters, this is why. */
++    xTaskCreateWithCaps(
+         [](void* arg) {
+             AudioService* audio_service = (AudioService*)arg;
+             audio_service->OpusCodecTask();
+-            vTaskDelete(NULL);
++            vTaskDeleteWithCaps(NULL);
+         },
+-        "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
++        "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_, MALLOC_CAP_SPIRAM);
+ }
+ 
+ void AudioService::Stop() {
 diff --git a/main/boards/common/esp_video.cc b/main/boards/common/esp_video.cc
 index 2f31a49..4cf6f63 100644
 --- a/main/boards/common/esp_video.cc
