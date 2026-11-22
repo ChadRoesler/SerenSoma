@@ -460,10 +460,22 @@ module's mic from inside the shell, on Chad's voice; then the UART's top speed.
 **Moved to its own repo, 20 Nov 2026:** `SerenGanglion` (Chad made it the same afternoon). The design,
 the mic-light rule and the connections live in its README. What stays here is the core's half:
 
-- The `llm` route forwards to `ganglion` like any allowed unit; `bashexec`, `push`, `upgrade` and
-  `rmmode` stay off the robot's API.
-- **The mic light is the core's.** Every few seconds it asks `sys.lstask`; anything that captures
-  audio running means the light is on, and no answer counts as listening.
+- **The `llm` route lets through a list of units, and refuses the rest** (build `0.0.0-dev.1121.1256`;
+  Psycheion caught on 21 Nov that the first lock only fenced `sys`, so M5's ears went through
+  unlit). Allowed: `sys` (only `ping`, `hwinfo`, `lsmode`, `lstask`, `version`), `ganglion`, `audio`,
+  `kws`, `vad`, `asr`, `whisper`, `llm`, `tts`, `melotts`, `yolo`. `camera` and `vlm` stay out until
+  the red light knows about them. `bashexec`, `push`, `upgrade` and `rmmode` stay off the robot's API.
+- **The mic light is the core's.** The floor, built in `1256`: a `setup` the core forwards to a
+  capture unit (`audio`, `kws`, `vad`, `asr`, `whisper`, or `ganglion` with an object starting
+  `ganglion.listen`) lights the green mic light until that task's `exit`. Standby can't put it out.
+  If no work id comes back, it holds the bare unit until an `exit` on that unit, so it fails toward
+  lit. The route's answer carries `micTasks` and `micOpen`.
+- **Still to build on top:** every few seconds the core asks `sys.lstask` and lights for any capture
+  *task* set up, whoever set it up, and no answer counts as listening. Tasks, not services: M5's
+  listening services run all day waiting for a `setup`. The floor misses one case the `lstask` check
+  covers: a core that reboots while the module still has a capture task up comes back dark.
+- **The bench test is the kernel's word:** `/proc/asound/card0/pcm0c/sub0/status` on the module reads
+  `RUNNING` exactly while the light should be on, and `closed` at rest (21 Nov).
 
 ## The robot's API
 

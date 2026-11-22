@@ -9,6 +9,7 @@
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
 #include <vector>
+#include <atomic>
 #include <cstring>
 #include <src/misc/cache/lv_cache.h>
 #include <settings.h>
@@ -382,8 +383,16 @@ void StackChanAvatarDisplay::LvglUnlock()
 
 // The status light, shown at the front on both sides (hal/rails.h says which LEDs those are).
 // Held, so a mood or a light show can't hide whether the mic is open. Black lets go.
+// The LLM module's mic counts too: while it's open the light shows the mic, whatever was asked.
+static std::atomic<bool> _module_mic{false};
+static uint8_t _asked_status[3] = {0, 0, 0};
+
 static void set_status_light(uint8_t r, uint8_t g, uint8_t b)
 {
+    _asked_status[0] = r, _asked_status[1] = g, _asked_status[2] = b;
+    if (_module_mic.load()) {
+        r = 0, g = 50, b = 0;   // the mic's green, the same as the core's own mic shows
+    }
     for (uint8_t led : rails::kStatusLeds) {
         if (r || g || b) {
             GetHAL().holdRgb(led, r, g, b);
@@ -392,6 +401,18 @@ static void set_status_light(uint8_t r, uint8_t g, uint8_t b)
         }
     }
     GetHAL().refreshRgb();
+}
+
+void hal_bridge::set_module_mic(bool open)
+{
+    if (_module_mic.exchange(open) != open) {
+        set_status_light(_asked_status[0], _asked_status[1], _asked_status[2]);
+    }
+}
+
+bool hal_bridge::module_mic_open()
+{
+    return _module_mic.load();
 }
 
 void StackChanAvatarDisplay::CreateIdleMotionModifier()

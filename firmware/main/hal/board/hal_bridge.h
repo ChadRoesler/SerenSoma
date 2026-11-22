@@ -100,4 +100,10 @@ void soma_set_setting(const char* key, int value);
 void app_play_sound(const std::string_view& sound);
 bool app_is_speaking();   // the voice channel is playing a reply right now
 
+// The LLM module's mic, as the core knows it from what it forwarded (a capture unit's setup, until
+// its exit). While open, the status light shows the mic whatever the core's own talk state says:
+// standby can't put it out. A floor until the core reads sys.lstask itself (appendages.md).
+void set_module_mic(bool open);
+bool module_mic_open();
+
 }  // namespace hal_bridge

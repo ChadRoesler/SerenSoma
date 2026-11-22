@@ -95,6 +95,8 @@ static const std::string_view _tag = "HAL-Control";
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <set>
+#include <mutex>
 #include <vector>
 
 using namespace stackchan;
@@ -1624,6 +1626,67 @@ esp_err_t handle_ambient(httpd_req_t* req)
  * and sends on 17, 115200 8N1, a line of JSON each way.
  * {"line": "...", "ms": 200..5000}; with no line it sends the module's ping.
  */
+// Which of the module's units the robot's API may reach (Psycheion, 21 Nov 2026: the first lock only
+// fenced sys, so any other unit, M5's ears included, went through). A unit not named here is refused,
+// so one nobody has thought about yet stays out. camera and vlm read a camera on the module and stay
+// out until the red light knows about them.
+static const char* const kModuleUnits[] = {"sys", "ganglion", "audio", "kws", "vad", "asr", "whisper",
+                                           "llm", "tts", "melotts", "yolo"};
+// The ones that capture sound. A setup forwarded to one opens the module's mic, so the status light
+// shows it until that task's exit. The ganglion joins when it listens: its objects "ganglion.listen...".
+static const char* const kCaptureUnits[] = {"audio", "kws", "vad", "asr", "whisper"};
+
+namespace {
+std::mutex _mic_tasks_lock;
+std::set<std::string> _mic_tasks;   // capture tasks set up through here: "kws.1001", or "kws" if no id came back
+
+bool named_in(const char* const* list, size_t n, const std::string& name)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (name == list[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string unit_of(const std::string& work_id)
+{
+    return work_id.substr(0, work_id.find('.'));
+}
+
+// After a line went out: a capture setup adds its task (from the answer's work_id, or the bare unit if
+// none came back, which only an exit on that unit clears); an exit takes it away. Fails toward lit.
+void follow_mic(const std::string& work_id, const std::string& action, const std::string& object,
+                const std::string& answer)
+{
+    const std::string unit = unit_of(work_id);
+    const bool capture     = named_in(kCaptureUnits, sizeof(kCaptureUnits) / sizeof(kCaptureUnits[0]), unit) ||
+                         (unit == "ganglion" && object.rfind("ganglion.listen", 0) == 0);
+    std::lock_guard<std::mutex> guard(_mic_tasks_lock);
+    if (action == "setup" && capture) {
+        std::string task = unit;
+        size_t at = 0;
+        while (at < answer.size()) {
+            const size_t end = answer.find('\n', at);
+            const std::string one = answer.substr(at, end == std::string::npos ? std::string::npos : end - at);
+            at = end == std::string::npos ? answer.size() : end + 1;
+            cJSON* reply = cJSON_Parse(one.c_str());
+            const cJSON* wid = cJSON_GetObjectItem(reply, "work_id");
+            if (cJSON_IsString(wid) && unit_of(wid->valuestring) == unit && std::strchr(wid->valuestring, '.')) {
+                task = wid->valuestring;
+            }
+            cJSON_Delete(reply);
+        }
+        _mic_tasks.insert(task);
+    } else if (action == "exit" && !_mic_tasks.empty()) {
+        _mic_tasks.erase(work_id);
+        _mic_tasks.erase(unit);
+    }
+    hal_bridge::set_module_mic(!_mic_tasks.empty());
+}
+}  // namespace
+
 esp_err_t handle_bench_llm(httpd_req_t* req)
 {
     if (!token_ok(req)) {
@@ -1637,6 +1700,8 @@ esp_err_t handle_bench_llm(httpd_req_t* req)
     }
     const int ms = uitk::clamp(json_int(body, "ms", 1500), 200, 5000);
     cJSON_Delete(body);
+
+    std::string sent_work, sent_action, sent_object;
 
     // The module's sys unit runs shell commands as root (sys.bashexec) and writes files
     // (sys.push). Forwarded blind, that made the robot's token a root shell on the module
@@ -1656,6 +1721,8 @@ esp_err_t handle_bench_llm(httpd_req_t* req)
             const cJSON* action = cJSON_GetObjectItem(cmd, "action");
             if (!cJSON_IsString(work) || !cJSON_IsString(action)) {
                 why = "a line needs a work_id and an action";
+            } else if (!named_in(kModuleUnits, sizeof(kModuleUnits) / sizeof(kModuleUnits[0]), unit_of(work->valuestring))) {
+                why = "not a unit the robot's API reaches: sys, ganglion, audio, kws, vad, asr, whisper, llm, tts, melotts, yolo";
             } else if (std::string(work->valuestring) == "sys") {
                 static const char* kReads[] = {"ping", "hwinfo", "lsmode", "lstask", "version"};
                 bool allowed = false;
@@ -1668,6 +1735,12 @@ esp_err_t handle_bench_llm(httpd_req_t* req)
                 }
 #endif
             }
+        }
+        if (!why) {
+            const cJSON* object = cJSON_GetObjectItem(cmd, "object");
+            sent_work   = cJSON_GetObjectItem(cmd, "work_id")->valuestring;
+            sent_action = cJSON_GetObjectItem(cmd, "action")->valuestring;
+            sent_object = cJSON_IsString(object) ? object->valuestring : "";
         }
         cJSON_Delete(cmd);
         if (why) {
@@ -1712,6 +1785,7 @@ esp_err_t handle_bench_llm(httpd_req_t* req)
         }
     }
     uart_driver_delete(UART_NUM_2);
+    follow_mic(sent_work, sent_action, sent_object, answer);
 
     // Bytes that are not text would break the JSON this goes out in; a wrong baud rate looks like that.
     auto printable = [](std::string& text) {
@@ -1737,6 +1811,15 @@ esp_err_t handle_bench_llm(httpd_req_t* req)
     cJSON_AddNumberToObject(root, "waitingBytes", static_cast<double>(waiting.size()));
     cJSON_AddNumberToObject(root, "waitingNotText", odd_waiting);
     cJSON_AddStringToObject(root, "waiting", waiting.c_str());
+    {
+        // What the status light is following: the module's capture tasks set up through here.
+        std::lock_guard<std::mutex> guard(_mic_tasks_lock);
+        cJSON* mic = cJSON_AddArrayToObject(root, "micTasks");
+        for (const std::string& task : _mic_tasks) {
+            cJSON_AddItemToArray(mic, cJSON_CreateString(task.c_str()));
+        }
+        cJSON_AddBoolToObject(root, "micOpen", !_mic_tasks.empty());
+    }
     return send_json(req, root);
 }
 
